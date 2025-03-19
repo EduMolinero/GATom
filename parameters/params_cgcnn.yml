@@ -1,0 +1,33 @@
+Model Parameters:
+  batch_size: 128
+  epochs: 500
+  num_workers: 0
+  name_dataset: 'mp_gap'
+  path_dataset: '/mnt/netapp1/Store_CSIC//home/csic/qud/ebm/datasets/matbench'
+  len_dataset: 30000
+  name: 'cgcnn'
+  internal_params:
+    hidden_channels: 150
+    num_layers: 4
+    pre_conv_layers: 1
+    post_conv_layers: 3
+    activation: "relu"
+    pooling: "global_mean_pool"
+    task: "regression"
+    dropout: 0.0
+    batch_track_stats: False
+  early_stopping: True
+  bool_plot: True
+
+Optimizer Parameters:
+  name: AdamW
+  lr: 1.0e-5
+  weight_decay: 1.0e-2
+
+Scheduler Parameters:
+  name: "ReduceLROnPlateau"
+  mode: "min"
+  factor: 0.8
+  patience: 10
+  threshold: 1.0e-3
+  min_lr: 1.0e-7
