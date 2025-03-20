@@ -1,40 +1,29 @@
 import time
 import os.path as osp
 import time
-import matplotlib.pyplot as plt
 import numpy as np
 import sys
 import os
-import pickle
 import argparse
 import yaml
 import random
 import itertools    
 
 import torch
-import torch.nn.functional as F
 
-import torch_geometric.transforms as T
 from torch_geometric.loader import DataLoader
 
 import models
 from data import MatbenchDataset
 from training import Trainer, train_model, Normalizer
 
-import pandas as pd
-
-import optuna 
-from optuna.trial import TrialState
-from functools import partial
 
 import ray
 from ray import tune
 
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel 
 from torch.utils.data.distributed import DistributedSampler
-from optuna_integration import TorchDistributedTrial
 
 # Global counter for naming
 counter = itertools.count()
@@ -198,7 +187,6 @@ def training_no_ddp(model_params,
                                         gpu_bool = gpu_bool
                                        )
 
-    # it not ideal for all the ranks to have the loaders, but it is easier to implement
     val_loader, test_loader = val_test_loaders_no_ddp(val_dataset, test_dataset, model_params["batch_size"], 
                                                           num_workers = model_params["num_workers"], gpu_bool = gpu_bool)
 
@@ -290,6 +278,7 @@ def objective(
             "pooling":          config["pooling"],
             "recurrent_cell":   config["recurrent_cell"],
             "activation":       config["activation"],
+            "activation_cell":  config["activation_cell"],
         },
         "graph_algorithm":  config["graph_algorithm"],
         "batch_size":       config["batch_size"],
@@ -360,15 +349,16 @@ def hyperparam_optim(args):
             # Model hyperparams
             "hidden_channels": tune.choice(dim),
             "layers_attention": tune.choice(layers),
-            "num_timesteps": tune.choice([1, 2, 3, 4]),
-            "pre_conv_layers": 1,  #tune.choice([1, 2, 3]), we found 1 is the best
+            "num_timesteps": 1, # tune.choice([1, 2, 3, 4]), this do not matter anymore
+            "pre_conv_layers": 1,  #tune.choice([1, 2, 3]), we found 1 to be the best
             "post_conv_layers": 3,   #tune.choice([1, 2, 3]),
             "dropout": tune.uniform(0.0, 0.9),
             "heads": tune.choice([1, 2, 3, 4]),
-            "aggregation": tune.choice(["mean", "add", "max"]),
+            "aggregation": tune.choice(["mean", "add", "max", "softmax"]),
             "pooling": tune.choice(["global_mean_pool", "global_add_pool", "global_max_pool"]),
-            "recurrent_cell": tune.choice(["gru", "ligru", "mgu"]),
-            "activation": tune.choice(["relu", "leaky_relu", "sigmoid", "softplus", "silu"]),
+            "recurrent_cell": None, #tune.choice(["gru", "ligru", "mgu"]), old version with recurrent cells
+            "activation": "silu", #tune.choice(["relu", "leaky_relu", "sigmoid", "softplus", "silu"]), we found silu to be the best
+            "activation_cell": tune.choice(["relu", "gelu", "silu", "sigmoid"]), # this translates into ReGLU, GeGLU, SiGLU, and GLU (with sigmoid)
             
             # Graph & batch size
             "graph_algorithm": tune.choice(["KNN", "Voronoi"]),
@@ -629,7 +619,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # only activate if the architecture of the gpu is Volta or higher. Remember to use batch sizes of multiples of 8!!!
+    # only activate if the architecture of the gpu is Volta or higher.
     if args.use_matf32:
         torch.set_float32_matmul_precision('medium')
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -655,141 +645,3 @@ if __name__ == '__main__':
         hyperparam_optim(args)
     else:
         raise ValueError(f"Calculation type {args.calculation_type} not implemented!")
-
-#### OLD things
-
-# def hyperparam_optim(args):
-#     width = 58  # Width inside the borders
-#     print(
-#         "=" * 62 + "\n"
-#         "||" + " Starting an Optuna hyperparameter optimization".center(width) + " ||\n"
-#         "||" + " Using the TPE sampler and the Median pruner".center(width) + " ||\n"
-#         "||" + " Parameters used:".ljust(width) + " ||\n"
-#         f"|| {'model_name':<15}: {args.model_name:<{width - 18}} ||\n"
-#         f"|| {'dataset':<15}: {args.name_dataset:<{width - 18}} ||\n"
-#         f"|| {'len_dataset':<15}: {args.len_dataset:<{width - 18}} ||\n"
-#         f"|| {'batch_size':<15}: {args.batch_size:<{width - 18}} ||\n"
-#         f"|| {'task':<15}: {args.task:<{width - 18}} ||\n"
-#         f"|| {'epochs':<15}: {args.epochs:<{width - 18}} ||\n"
-#         f"|| {'num_workers':<15}: {args.num_workers:<{width - 18}} ||\n"
-#         f"|| {'ntrials':<15}: {args.ntrials:<{width - 18}} ||\n"
-#         f"|| {'torch_compile':<15}: {args.torch_compile:<{width - 18}} ||\n"
-#         f"|| {'use_matf32':<15}: {args.use_matf32:<{width - 18}} ||\n"
-#         f"|| {'graph_algorithm':<15}: {args.graph_algorithm:<{width - 18}} ||\n"
-#         + "=" * 62
-#     )
-#     sys.stdout.flush()
-
-#     # Init the parameters
-#     model_params, optimizer_params, scheduler_params = init_params(args)
-
-#     # set bool_plot to False
-#     model_params["bool_plot"] = False
-#     # set parallel_bool to False and rank to 0
-#     model_params["parallel_bool"] = False
-#     model_params["rank"] = 0
-
-#     study = optuna.create_study(sampler = optuna.samplers.TPESampler(), pruner = optuna.pruners.MedianPruner(), direction="minimize")
-#     # We use partial to pass the fixed parameters to the objective function
-#     objective_partial = partial(objective, 
-#                         model_params = model_params, 
-#                         optimizer_params = optimizer_params, 
-#                         scheduler_params = scheduler_params
-#                     )
-#     study.optimize(objective_partial, n_trials=args.ntrials)
-
-#     assert study is not None, "Study object is None"
-#     pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
-#     complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
-
-#     print("Study statistics: ")
-#     print("  Number of finished trials: ", len(study.trials))
-#     print("  Number of pruned trials: ", len(pruned_trials))
-#     print("  Number of complete trials: ", len(complete_trials))
-
-#     fig_timeline = optuna.visualization.matplotlib.plot_timeline(study)
-#     fig_opt_history = optuna.visualization.matplotlib.plot_optimization_history(study)
-#     fig_inter_values = optuna.visualization.matplotlib.plot_intermediate_values(study)
-
-#     fig_timeline.figure.savefig("fig_timeline.png")
-#     fig_opt_history.figure.savefig("fig_opt_history.png")
-#     fig_inter_values.figure.savefig("fig_inter_values.png")
-
-#     print("Best trial:")
-#     trial = study.best_trial
-
-#     print("  Value: ", trial.value)
-#     sys.stdout.flush()
-#     with open('study.pkl', 'wb') as f:
-#         pickle.dump(study, f)
-
-#     with open('best_params.pkl', 'wb') as f:
-#         pickle.dump(trial, f)
-    
-#     return None
-
-
-
-# def objective(trial,
-#     model_params :dict,
-#     optimizer_params :dict,
-#     scheduler_params :dict
-#     ):
-
-#     max_layers = 30 if model_params["internal_params"]["residual_connection"] else 5
-#     step_layers = 5 if model_params["internal_params"]["residual_connection"] else 1
-#     batch_sizes = [8, 16, 32, 64, 128] # multiples of 8 for matf32
-
-#     # Define the search space
-#     if model_params["name"] == 'GATom':
-#         suggestions_model = {
-#             "internal_params" : {
-#                 "hidden_channels" :trial.suggest_int('hidden_channels', 50, 200, step = 25),
-#                 "layers_attention" :trial.suggest_int('layers_attention', 5, max_layers, step = step_layers),
-#                 "num_timesteps" : trial.suggest_int('num_timesteps', 1, 3),
-#                 "pre_conv_layers" : trial.suggest_int('pre_conv_layers', 1, 3),
-#                 "post_conv_layers" : trial.suggest_int('post_conv_layers', 1, 3),
-#                 "dropout" :trial.suggest_float('dropout', 0.0, 0.9, step = 0.1),
-#                 "heads" :trial.suggest_int('heads', 1, 4),
-#                 "aggregation" :trial.suggest_categorical('aggregation', ['mean', 'add', 'max']),
-#                 "pooling" :trial.suggest_categorical('pooling', ['global_mean_pool', 'global_add_pool', 'global_max_pool']),
-#                 "recurrent_cell" :trial.suggest_categorical('recurrent_cell', ['gru', 'ligru', 'mgu']),
-#                 "activation" :trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'sigmoid']),
-#             },
-#             "graph_algorithm" : trial.suggest_categorical('graph_algorithm', ['KNN', 'Voronoi']),
-#             "batch_size" : trial.suggest_categorical('batch_size', batch_sizes),
-#         }
-#         suggestions_optimizer = {
-#             "lr" :trial.suggest_float('lr', 1e-7, 1e-3, step = 5e-1,log=True),
-#             "weight_decay" :trial.suggest_float('weight_decay', 1e-6, 1e-1, step=5e-1, log=True),
-#         }
-#     elif model_params["name"] == 'IMcgcnn':
-#         suggestions_model = {
-#                 "internal_params" : {
-#                     "hidden_channels" : trial.suggest_int('hidden_channels', 50, 200, step = 25),
-#                     "num_layers" : trial.suggest_int('num_layers', 5, max_layers, step = step_layers),
-#                     "pre_conv_layers" : trial.suggest_int('pre_conv_layers', 1, 3),
-#                     "post_conv_layers" : trial.suggest_int('post_conv_layers', 1, 3),
-#                     "dropout" : trial.suggest_float('dropout', 0.0, 0.9, step = 0.1),
-#                     "pooling" : trial.suggest_categorical('pooling', ['global_mean_pool', 'global_add_pool', 'global_max_pool']),
-#                     "activation" : trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'sigmoid']),
-#                 },
-#                 "graph_algorithm" : trial.suggest_categorical('graph_algorithm', ['KNN', 'Voronoi']),
-#                 "batch_size" : trial.suggest_categorical('batch_size', batch_sizes),
-#         }
-#         suggestions_optimizer = {
-#             "lr" :trial.suggest_float('lr', 1e-7, 1e-3, step = 5e-1,log=True),
-#             "weight_decay" :trial.suggest_float('weight_decay', 1e-6, 1e-1, log=True),
-#         }
-
-#     else:
-#         raise ValueError("Model not implemented!")
-    
-#     # Update the dictionaries with the suggested values
-#     model_params = deep_update(model_params,suggestions_model)
-#     sys.stdout.flush()
-#     optimizer_params["params"].update(suggestions_optimizer)
-
-#     best_val_error, best_test_error = training_no_ddp(model_params, optimizer_params, scheduler_params, trial)
-#     return best_val_error
-

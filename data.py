@@ -75,8 +75,6 @@ def OneHotDegree(data, max_degree, in_degree=False, cat=True):
 class MatbenchDataset(InMemoryDataset):
     """
     Matbench dataset class for PyTorch
-    Very (really bad) poorly implementented --> Improve it
-    To do: implenten things as download_url, etc.
     """
     def __init__(self, 
                 root,
@@ -169,11 +167,5 @@ class MatbenchDataset(InMemoryDataset):
                 total_memory += data.num_edges * 2 * data.edge_attr.element_size() + data.num_nodes * data.x.element_size()
                 print(f'Memory used: {bytes_to(total_memory, "m"):.4f} MB')
 
-            #Now we perform several operations on the dataset
-            # for index in range(0, len(data_list)):
-            #     # we add the degree of each node as a one hot encoding
-            #     data_list[index] = OneHotDegree(
-            #         data_list[index], max_degree=12, in_degree=False, cat=True
-            #     )
             
             torch.save(self.collate(data_list), processed_path)

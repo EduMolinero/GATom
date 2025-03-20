@@ -58,9 +58,11 @@ class EarlyStopper:
     
 
 class Trainer:
-    __slots__ = ['device', 'epochs', 'save_every',
-                 'task','loss_function', 'parallel_bool', 'rank', 'eval_metric'
-                  ]
+    __slots__ = [
+        'device', 'epochs', 'save_every',
+        'task','loss_function', 'parallel_bool', 
+        'rank', 'eval_metric',
+    ]
     def __init__(self, params: dict) -> None:
         for key, value in params.items():
             if key in self.__slots__:
@@ -98,7 +100,6 @@ class Trainer:
         norm = 0
         preds, targets = [], []
         model.eval()
-        
         with torch.no_grad():
             for data in loader:
                 data = data.to(self.device, non_blocking=True)
@@ -215,12 +216,6 @@ def train_model(
         # scheduler
         if scheduler is not None: 
             scheduler.step(val_metric)
-
-        # # Prune algorithm. Note: This is only for Optuna library -> hyperparameter optimization
-        # if trial is not None:
-        #     trial.report(val_metric, epoch)
-        #     if trial.should_prune():
-        #         raise optuna.TrialPruned()
 
 
     cuda_max_mem = bytes_to(torch.cuda.max_memory_allocated(), 'g')

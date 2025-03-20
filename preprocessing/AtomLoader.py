@@ -1,9 +1,8 @@
-from typing import List, Tuple, Dict, AnyStr, Union
+from typing import List, Dict, AnyStr, Union
 
 import numpy as np
 import json
-from pymatgen.core import Element, Structure
-from pymatgen.analysis.molecule_structure_comparator import CovalentRadius
+from pymatgen.core import Structure
 from tqdm import tqdm
 
 from torch.nn.functional import one_hot
