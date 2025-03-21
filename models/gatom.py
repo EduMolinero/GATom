@@ -104,7 +104,7 @@ class GATom(torch.nn.Module):
         self.task = task
         self.pooling = pooling
         self.activation = activation 
-        self.recurrent_cell_class = recurrent_cell_classes.get(recurrent_cell.lower())
+        self.recurrent_cell_class = recurrent_cell_classes.get(recurrent_cell.lower()) if recurrent_cell is not None else None
         self.activation_cell = activation_cell
         self.pre_conv_layers = pre_conv_layers
         self.post_conv_layers = post_conv_layers

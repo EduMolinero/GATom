@@ -453,6 +453,7 @@ def hyperparam_optim(args):
         ),
         run_config=RunConfig(
             name="hyperparam_optimization",
+            log_to_file=True,
             storage_path=storage_path,
             verbose=1
         )
