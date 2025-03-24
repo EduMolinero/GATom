@@ -1,6 +1,6 @@
 # GATom
 
-**GATom**: a Graph + Gated Attention-based neural neTwork for materials.
+**GATom**: a Graph + Gated Attention-based neural neTwork for material property prediction.
 
 This repository host a Graph Neural Network Model to predict the properties of materials for their crystalline structure.
 The structures is converted into a graph (which retains all the symmetries) and then it is feeded into the network to infer the desired property, e.g., the value of the gap.
@@ -19,6 +19,9 @@ It is a fork from the `keras-crystal` (link) library adapted to work with `Pytor
 
 **Note**: The model is still under development and we are currently writing a paper about the model to explain it with more detail.
 
+## Training & Evaluation
+
+The training plus the evaluation is done through the `Trainer` class inside `training.py`
 
 ## Parameters
 
@@ -37,12 +40,12 @@ Currently, the best achieved performance for each of the datasets is
 
 ## How to use
 
-We provide a sample `.sbatch`script on how to run the model. 
+We provide a sample `.sbatch` script on how to run the model. 
 It only needs a `.yml` configuration file on the same folder.
 Right now, the `main.py` accepts two possible types of calculations which are given as arguments in the parser.
 
--`--single_calc`: Performs a full training (alongside obtaining evaluation and testing errors) routine for the given dataset.
--`--hyperparam_optim`: Performs a hyperparameter optimization using the Ray Tune library for the given dataset.
+- `--single_calc`: Performs a full training (alongside obtaining evaluation and testing errors) routine for the given dataset.
+- `--hyperparam_optim`: Performs a hyperparameter optimization using the Ray Tune library for the given dataset.
 
 ## Diagram
 
@@ -50,10 +53,11 @@ We provide a flow diagram of how to proceed for a given dataset:
 
 ```mermaid
 flowchart LR;
-    A(Dataset) -->|Atom Features| B(AtomLoader);
-    A -->|Graph Representation| C(data);
+    A[(Dataset)] -->|Atom Features| B(AtomLoader);
+    A -->|Graph Representation| G(crystal_builder);
+    G --> C(data);
     B --> C;
-    C --> D{Model};
+    C --> D{GATom};
     D --> E(Trainer);
     E --> F[Results];
 ```
