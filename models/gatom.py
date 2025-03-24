@@ -140,7 +140,9 @@ class GATom(torch.nn.Module):
             self.embedding_att_convs.append(GATv2Conv(hidden_channels, hidden_channels, heads = self.heads, dropout=dropout,
                                             add_self_loops=False, negative_slope=0.01, edge_dim=hidden_channels,
                                             aggr = self.aggregation))
+
             # The output of the GATv2Conv has dimensions (N, out_channels * heads)
+            self.embedding_norms.append(DiffGroupNorm(hidden_channels * self.heads, groups=10))
             if self.glu_over_gru:
                 # the input dimension will be dim(x) + dim(h) = hidden_channels +  hidden_channels * heads = hidden_channels * (heads + 1)
                 self.embedding_gate.append(GeneralGLU(hidden_channels * (self.heads + 1), hidden_channels, activation = self.activation_cell))
@@ -150,8 +152,6 @@ class GATom(torch.nn.Module):
                 if self.recurrent_cell_class is None:
                     raise ValueError(f"Unknown recurrent cell: {self.recurrent_cell}")
             
-            #self.embedding_norms.append(BatchNorm(hidden_channels))
-            self.embedding_norms.append(DiffGroupNorm(hidden_channels, groups=10))
 
         # Global attention
         # In order to have a global attention we need to add a super node to the graph
@@ -164,7 +164,6 @@ class GATom(torch.nn.Module):
             self.global_gate = GeneralGLU(2 * hidden_channels, hidden_channels, activation = self.activation_cell)
         else:
             self.global_gate = self.recurrent_cell_class(hidden_channels, hidden_channels)
-        #self.global_norm = BatchNorm(hidden_channels)
         self.global_norm = DiffGroupNorm(hidden_channels, groups=10)
 
         #################################################################
@@ -206,38 +205,48 @@ class GATom(torch.nn.Module):
         for index_layer, (att_conv, gate, norm) in enumerate(zip(self.embedding_att_convs, self.embedding_gate, self.embedding_norms)):
             # we follow the skip connection (Res+) strategy
             # Normalization -> Activation -> Dropout -> Conv -> Res
-            # Conv :  GAT + GRU -> g_l := Conv(x_l)
+            # Conv :  GAT + GLU/GRU -> g_l := Conv(x_l)
             # Res+ : x_l = g_{l-1} + x_{l-1}
             if self.res_connection:
-                g = norm(x)
-                g = F.relu(g)
-                g = F.dropout(g, p=self.dropout, training=self.training)
                 if self.glu_over_gru:
-                    h = att_conv(g, edge_index, edge_attr)
-                    x = gate(torch.cat([x, h], dim=-1))
+                    x = getattr(F, self.activation)(x)
+                    x = F.dropout(x, p=self.dropout, training=self.training)
+                    g = norm(att_conv(x, edge_index, edge_attr))
+                    X = gate(torch.cat([x, g], dim=-1))
+                    x = x + X
                 else:
+                    g = norm(x)
+                    g = F.relu(x)
+                    g = F.dropout(g, p=self.dropout, training=self.training)
                     for t in range(self.num_timesteps):
                         h = getattr(F, self.activation_cell)(att_conv(g, edge_index, edge_attr))
                         g = gate(h, g).relu()
-                x = x + g
+                    x = x + g
+                    x = norm(x)
                 ## Res connection
                 # Conv -> Norm -> activation -> Res
-                # for t in range(self.num_timesteps):
-                #     h = getattr(F, self.activation_cell)(att_conv(x, edge_index, edge_attr))
-                #     h = F.dropout(h, p=self.dropout, training=self.training)
-                #     g = gru(h, x).relu()
-                # g = norm(g)
-                # x = x + F.relu(g)
+                # if self.glu_over_gru:
+                #     h = att_conv(x, edge_index, edge_attr)
+                #     g = gate(torch.cat([x, h], dim=-1)) 
+                #     g = norm(g)
+                #     x = x + F.relu_(g)
+                # else:
+                #     for t in range(self.num_timesteps):
+                #         h = getattr(F, self.activation_cell)(att_conv(x, edge_index, edge_attr))
+                #         h = F.dropout(h, p=self.dropout, training=self.training)
+                #         g = gate(h, x).relu()
+                #         g = norm(g)
+                #         x = x + F.relu(g)
             else:
                 if self.glu_over_gru:
-                    h = att_conv(x, edge_index, edge_attr)
+                    h = norm(att_conv(x, edge_index, edge_attr))
                     x = gate(torch.cat([x, h], dim=-1))
                 else:
                     for t in range(self.num_timesteps):
                         h = getattr(F, self.activation_cell)(att_conv(x, edge_index, edge_attr))
                         h = F.dropout(h, p=self.dropout, training=self.training)
                         x = gate(h, x).relu()
-                x = norm(x)
+                        x = norm(x)
 
         # Global attention
         row = torch.arange(batch.size(0), device=batch.device)

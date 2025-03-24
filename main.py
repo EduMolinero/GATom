@@ -61,10 +61,8 @@ def init_params(args):
     model_params["len_dataset"] = args.len_dataset
     model_params["name_dataset"] = args.name_dataset
     model_params["epochs"] = args.epochs
-    model_params["batch_size"] = args.batch_size
     model_params["num_workers"] = args.num_workers
     model_params["ntrials"] = args.ntrials
-    model_params["graph_algorithm"] = args.graph_algorithm
     model_params["internal_params"]["task"] = args.task
 
     return model_params, optimizer_params, scheduler_params
@@ -342,8 +340,7 @@ def hyperparam_optim(args):
     min_layers = 5 if model_params["internal_params"]["residual_connection"] else 1
     layers = [x for x in range(min_layers, max_layers + 1, step_layers)] # 5, 10,... 30 or 1, 2,... 5
     dim = [x * 25 for x in range(1, 9)] # 25, 50,... 200
-    batch_sizes = [8, 16, 32, 64, 128] if model_params["internal_params"]["residual_connection"] else [32, 64, 128]
-    # multiples of 8 for matf32
+    batch_sizes = [64, 128, 256]
 
     search_space["GATom"] = {
             # Model hyperparams
@@ -357,7 +354,7 @@ def hyperparam_optim(args):
             "aggregation": tune.choice(["mean", "add", "max", "softmax"]),
             "pooling": tune.choice(["global_mean_pool", "global_add_pool", "global_max_pool"]),
             "recurrent_cell": None, #tune.choice(["gru", "ligru", "mgu"]), old version with recurrent cells
-            "activation": "silu", #tune.choice(["relu", "leaky_relu", "sigmoid", "softplus", "silu"]), we found silu to be the best
+            "activation": tune.choice(["relu", "leaky_relu", "sigmoid", "silu"]), # we found silu to be the best
             "activation_cell": tune.choice(["relu", "gelu", "silu", "sigmoid"]), # this translates into ReGLU, GeGLU, SiGLU, and GLU (with sigmoid)
             
             # Graph & batch size
@@ -365,7 +362,7 @@ def hyperparam_optim(args):
             "batch_size": tune.choice(batch_sizes),
 
             # Optimizer hyperparams
-            "lr": tune.loguniform(1e-5, 5e-2),
+            "lr": tune.loguniform(1e-6, 1e-3),
             "weight_decay": tune.loguniform(1e-5, 1e-1),
     }
 
@@ -413,10 +410,13 @@ def hyperparam_optim(args):
         print("Using local_mode for ray. This is meant for debugging purposes.")
         ray.init(ignore_reinit_error=True, local_mode=True, num_cpus=1, num_gpus=0)
 
+
+    mode = "min" if model_params["internal_params"]["task"] == "regression" else "max" # minimize error or maximize accuracy
+
     # set up variables from ray tune
     search_algorithm = HyperOptSearch(
         metric="loss",
-        mode="min",
+        mode=mode,
         n_initial_points=5,
     )
 
@@ -425,7 +425,7 @@ def hyperparam_optim(args):
 
     scheduler = ASHAScheduler(
         metric="loss",
-        mode="min",
+        mode=mode,
         max_t=model_params["epochs"],
         reduction_factor=2
     )
@@ -489,13 +489,11 @@ def single_calculation_no_ddp(args):
         f"|| {'dpp':<15}: {args.ddp:<{width - 18}} ||\n"
         f"|| {'dataset':<15}: {args.name_dataset:<{width - 18}} ||\n"
         f"|| {'len_dataset':<15}: {args.len_dataset:<{width - 18}} ||\n"
-        f"|| {'batch_size':<15}: {args.batch_size:<{width - 18}} ||\n"
         f"|| {'task':<15}: {args.task:<{width - 18}} ||\n"
         f"|| {'epochs':<15}: {args.epochs:<{width - 18}} ||\n"
         f"|| {'num_workers':<15}: {args.num_workers:<{width - 18}} ||\n"
         f"|| {'torch_compile':<15}: {args.torch_compile:<{width - 18}} ||\n"
         f"|| {'use_matf32':<15}: {args.use_matf32:<{width - 18}} ||\n"
-        f"|| {'graph_algorithm':<15}: {args.graph_algorithm:<{width - 18}} ||\n"
         f"|| {'fix_seed':<15}: {args.fix_seed:<{width - 18}} ||\n"
         + "=" * 62
     )
@@ -572,12 +570,6 @@ if __name__ == '__main__':
         help='Total epochs to train the model'
     )
     parser.add_argument(
-        '--batch_size', 
-        default=128, 
-        type=int, 
-        help='Input batch size on each device (default: 128)'
-    )
-    parser.add_argument(
         '--len_dataset', 
         help='Length of the dataset'
     )
@@ -604,12 +596,6 @@ if __name__ == '__main__':
         action="store_true", 
         default=False, 
         help='Whether to use matf32 or not'
-    )
-    parser.add_argument(
-        '--graph_algorithm', 
-        type=str, 
-        default='KNN', 
-        help='Graph algorithm to use'
     )
     parser.add_argument(
         '--fix_seed', 

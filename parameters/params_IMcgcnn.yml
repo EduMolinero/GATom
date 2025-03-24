@@ -1,10 +1,7 @@
 Model Parameters:
   batch_size: 128
   epochs: 500
-  num_workers: 0
-  name_dataset: 'mp_gap'
-  path_dataset: '/mnt/netapp1/Store_CSIC//home/csic/qud/ebm/datasets/matbench'
-  len_dataset: 30000
+  graph_algorithm: "KNN"
   name: 'IMcgcnn'
   internal_params:
     hidden_channels: 150
