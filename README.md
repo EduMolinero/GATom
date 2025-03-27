@@ -23,7 +23,7 @@ GATom is a graph neural network architecture that combines local and global grap
 
 **Note**: The model is still under development and we are currently writing a paper about the model to explain it with more detail.
 
-We have also included a custom implementation of in `cgcnn.py` and an "improved" version (`IMcgcnn.py`) in which the edge features are also convoluted. However, we found that the edge convolution did not increase the accuracy of the model.
+We have also included a custom implementation of the [_Crystal Graph Convolutional Neural Networks for an Accurate and Interpretable Prediction of Material Properties_](https://doi.org/10.1103/PhysRevLett.120.145301) in `cgcnn.py` and an "improved" version (`IMcgcnn.py`) in which the edge features are also convoluted. However, we found that the edge convolution did not increase the accuracy of the model.
 
 ## Training & Evaluation
 
