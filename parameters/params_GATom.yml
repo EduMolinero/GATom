@@ -8,11 +8,10 @@ Model Parameters:
     pre_conv_layers: 2
     post_conv_layers: 2
     layers_attention: 4
-    num_timesteps: 2
-    recurrent_cell: 'ligru'
     pooling: 'global_add_pool'
     aggregation: 'add'
     activation: 'relu'
+    activation_cell: 'silu'
     heads:  2
     residual_connection: True
     task: 'regression'

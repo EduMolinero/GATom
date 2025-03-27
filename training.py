@@ -185,14 +185,24 @@ def train_model(
         if trainer.rank == 0:
             val_metric = trainer.evaluation(validation_loader, model)
             test_metric = trainer.evaluation(test_loader, model)
-            print(f'Epoch: {epoch:03d}, Loss: {loss:.4f} Val MAE: {val_metric:.4f} '
-                f'Test MAE: {test_metric:.4f}')
-            print(f"Time for epoch {epoch}: {time.time() - start_epoch:.4f} seconds")
-            sys.stdout.flush()
-            if best_val_error is None or val_metric <= best_val_error:
-                best_val_error = val_metric
-                best_test_error = test_metric
-                best_epoch = epoch
+            if trainer.task == 'regression':
+                print(f'Epoch: {epoch:03d}, Loss: {loss:.4f} Val MAE: {val_metric:.4f} '
+                    f'Test MAE: {test_metric:.4f}')
+                print(f"Time for epoch {epoch}: {time.time() - start_epoch:.4f} seconds")
+                sys.stdout.flush()
+                if best_val_error is None or val_metric <= best_val_error:
+                    best_val_error = val_metric
+                    best_test_error = test_metric
+                    best_epoch = epoch
+            else:
+                print(f'Epoch: {epoch:03d}, Loss: {loss:.4f} Val ROCAUC: {val_metric:.4f} '
+                    f'Test ROCAUC: {test_metric:.4f}')
+                print(f"Time for epoch {epoch}: {time.time() - start_epoch:.4f} seconds")
+                sys.stdout.flush()
+                if best_val_error is None or val_metric >= best_val_error:
+                    best_val_error = val_metric
+                    best_test_error = test_metric
+                    best_epoch = epoch
 
             mean_time += time.time() - start_epoch
             t.append(epoch)
@@ -219,7 +229,6 @@ def train_model(
 
 
     cuda_max_mem = bytes_to(torch.cuda.max_memory_allocated(), 'g')
-    #print(prof.key_averages())
     if trainer.rank == 0:
         print(f"Total time: {time.time() - start:.4f} seconds || {(time.time() - start)/60 :.4f} minutes || {(time.time() - start)/3600 :.4f} hours")
         print(f"Mean time per epoch: {mean_time/trainer.epochs:.4f} seconds")

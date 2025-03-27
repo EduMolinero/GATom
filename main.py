@@ -267,14 +267,12 @@ def objective(
         "internal_params": {
             "hidden_channels":  config["hidden_channels"],
             "layers_attention": config["layers_attention"],
-            "num_timesteps":    config["num_timesteps"],
             "pre_conv_layers":  config["pre_conv_layers"],
             "post_conv_layers": config["post_conv_layers"],
             "dropout":          config["dropout"],
             "heads":            config["heads"],
             "aggregation":      config["aggregation"],
             "pooling":          config["pooling"],
-            "recurrent_cell":   config["recurrent_cell"],
             "activation":       config["activation"],
             "activation_cell":  config["activation_cell"],
         },
@@ -341,20 +339,20 @@ def hyperparam_optim(args):
     layers = [x for x in range(min_layers, max_layers + 1, step_layers)] # 5, 10,... 30 or 1, 2,... 5
     dim = [x * 25 for x in range(1, 9)] # 25, 50,... 200
     batch_sizes = [64, 128, 256]
+    lrs = [1e-6, 5e-6, 1e-5, 5e-5, 1e-4]
+    weight_decays = [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2]
 
     search_space["GATom"] = {
             # Model hyperparams
             "hidden_channels": tune.choice(dim),
             "layers_attention": tune.choice(layers),
-            "num_timesteps": 1, # tune.choice([1, 2, 3, 4]), this do not matter anymore
             "pre_conv_layers": 1,  #tune.choice([1, 2, 3]), we found 1 to be the best
             "post_conv_layers": 3,   #tune.choice([1, 2, 3]),
             "dropout": tune.uniform(0.0, 0.9),
             "heads": tune.choice([1, 2, 3, 4]),
             "aggregation": tune.choice(["mean", "add", "max", "softmax"]),
             "pooling": tune.choice(["global_mean_pool", "global_add_pool", "global_max_pool"]),
-            "recurrent_cell": None, #tune.choice(["gru", "ligru", "mgu"]), old version with recurrent cells
-            "activation": tune.choice(["relu", "leaky_relu", "sigmoid", "silu"]), # we found silu to be the best
+            "activation": tune.choice(["relu", "leaky_relu", "sigmoid", "silu"]), 
             "activation_cell": tune.choice(["relu", "gelu", "silu", "sigmoid"]), # this translates into ReGLU, GeGLU, SiGLU, and GLU (with sigmoid)
             
             # Graph & batch size
@@ -362,8 +360,8 @@ def hyperparam_optim(args):
             "batch_size": tune.choice(batch_sizes),
 
             # Optimizer hyperparams
-            "lr": tune.loguniform(1e-6, 1e-3),
-            "weight_decay": tune.loguniform(1e-5, 1e-1),
+            "lr": tune.choice(lrs),
+            "weight_decay": tune.choice(weight_decays),
     }
 
     search_space["IMcgcnn"] = {
@@ -412,10 +410,10 @@ def hyperparam_optim(args):
 
 
     mode = "min" if model_params["internal_params"]["task"] == "regression" else "max" # minimize error or maximize accuracy
-
+    metric = "loss" if model_params["internal_params"]["task"] == "regression" else "accuracy" # error or accuracy
     # set up variables from ray tune
     search_algorithm = HyperOptSearch(
-        metric="loss",
+        metric=metric,
         mode=mode,
         n_initial_points=5,
     )
@@ -424,7 +422,7 @@ def hyperparam_optim(args):
         search_algorithm = ConcurrencyLimiter(search_algorithm, max_concurrent=torch.cuda.device_count())
 
     scheduler = ASHAScheduler(
-        metric="loss",
+        metric=metric,
         mode=mode,
         max_t=model_params["epochs"],
         reduction_factor=2
@@ -463,7 +461,7 @@ def hyperparam_optim(args):
     results = tuner.fit()
 
     # get the best results
-    best_result = results.get_best_result(metric="loss", mode="min")
+    best_result = results.get_best_result(metric=metric, mode=mode)
     best_config = best_result.config
 
     print("Best trial config:", best_config)
@@ -474,7 +472,7 @@ def hyperparam_optim(args):
     df = results.get_dataframe()
     df.to_csv("results.csv")
     
-    df_sorted = df.sort_values(by="loss", ascending=True)
+    df_sorted = df.sort_values(by=metric, ascending=True)
     print(df_sorted.to_string())
 
 

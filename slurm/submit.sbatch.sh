@@ -19,19 +19,16 @@ cp $PATH_TO_CODE/*py ./
 cp -r $PATH_TO_CODE/crystal_builder ./
 cp -r $PATH_TO_CODE/models ./
 
-path_to_data="$PATH_TO_DATA/datasets/matbench/"
 
 srun python main.py \
     --calculation_type single_calc \
     --epochs 250 \
-    --batch_size 64 \
     --len_dataset all \
     --name_dataset mp_gap \
-    --path_dataset $path_to_data \
+    --path_dataset $PATH_TO_DATA \
     --task regression \
     --model_name GATom \
     --num_workers 4 \
-    --graph_algorithm Voronoi \
     --use_matf32 \
     > output.out 2> output.err
 

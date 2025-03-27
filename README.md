@@ -10,14 +10,20 @@ The structures is converted into a graph (which retains all the symmetries) and 
 This folder contains the `AtomLoader.py`file which generates the atom features vector representations.
 It also contains a `main.py` file to generate those representations.
 
-## Crystal Builder
+## Data Construction
 
-This folder contains the files need to convert the crystal structure into a graph using a variety of algorithms.
-It is a fork from the `keras-crystal` (link) library adapted to work with `Pytorch` objects.
+The `crystal_builder` folder contains the files need to convert the crystal structure into a graph using a variety of algorithms.
+It is a fork from the [`kgcnn`](https://github.com/aimat-lab/gcnn_keras/tree/master/kgcnn/crystal) library adapted to work with `Pytorch` objects. All the credits should be given to the authors of that library.
+
+The `Pytorch-Geometric` dataset is built using `data.py` file where atom and edge features are incorporated into the graph.
 
 ## Models 
 
+GATom is a graph neural network architecture that combines local and global graph attention with gating (using GLU) and optional residual connections for node and edge feature processing. 
+
 **Note**: The model is still under development and we are currently writing a paper about the model to explain it with more detail.
+
+We have also included a custom implementation of in `cgcnn.py` and an "improved" version (`IMcgcnn.py`) in which the edge features are also convoluted. However, we found that the convolution did not increase the accuracy of the model.
 
 ## Training & Evaluation
 
@@ -32,11 +38,11 @@ Furthermore, we include the best set of hyperparameters (found using bayesian op
 
 Currently, the best achieved performance for each of the datasets is
 
-| Dataset                     	| _mp_gap_ (MAE eV) 	| _perovskites_ (MAE eV/unitcell) 	| _mp_e_form_ (MAE eV/atom) 	| _mp_is_metal_ (ROCAUC) 	|
-|-----------------------------	|-------------------	|------------------------	|---------------------------	|------------------------	|
-| Without Residual Connection 	| 0.23              	| 0.03                   	|                           	| 94                     	|
-| With Residual Connection    	| 0.21              	| 0.02                   	|                           	| 95                     	|
 
+|           Dataset           	| _mp_gap_ (MAE eV) 	| _perovskites_ (MAE eV/unit cell) 	| _mp_is_metal_ (ROCAUC) 	|
+|:---------------------------:	|:-----------------:	|:--------------------------------:	|:----------------------:	|
+| Without Residual Connection 	| 0.21040           	| 0.05404                          	| 0.95024                	|
+| With Residual Connection    	| 0.23214           	| 0.04486                          	| 0.95738                	|
 
 ## How to use
 

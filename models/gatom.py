@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-from torch_geometric.nn import GATv2Conv, DiffGroupNorm
+from torch_geometric.nn import GATv2Conv, DiffGroupNorm, LayerNorm
 from torch_geometric.nn.dense.linear import Linear
                     
 from torch import Tensor
@@ -62,11 +62,67 @@ class GeneralGLU(torch.nn.Module):
 
                     
 class GATom(torch.nn.Module):
-    r"""
+    """
+    A Graph Attention Network (GAT) model that integrates both local and global
+    attention mechanisms, using GLU gating, and supports
+    residual connections for graph-level classification or regression tasks.
 
     Args:
-    
+        in_channels (int): 
+            Number of input features per node.
+        hidden_channels (int): 
+            Dimensionality of the hidden node embeddings.
+        out_channels (int): 
+            Number of output features for the final prediction.
+        edge_dim (int): 
+            Number of input features per edge.
+        layers_attention (int): 
+            Number of local attention layers to stack. Defaults to 4.
+        activation_cell (str, optional): 
+            Activation to use inside the gating cell (e.g., "relu", "elu"). Defaults to "elu".
+        pooling (str, optional): 
+            Graph pooling method for readout (e.g., "global_add_pool"). Defaults to "global_add_pool".
+        aggregation (str, optional): 
+            Aggregation strategy for GATv2Conv (e.g., "add", "softmax", "powermean"). Defaults to "add".
+        activation (str, optional): 
+            Top-level activation for hidden layers (e.g., "silu", "relu"). Defaults to "silu".
+        heads (int, optional): 
+            Number of attention heads for local attention. Defaults to 1.
+        residual_connection (bool, optional): 
+            Whether to add skip connections between layers. Defaults to False.
+        task (str, optional): 
+            Model task type: "classification" or "regression". Defaults to "regression".
+        dropout (float, optional): 
+            Dropout probability for attention layers. Defaults to 0.0.
+        pre_conv_layers (int, optional): 
+            Number of linear layers to transform node/edge features before GAT. Defaults to 1.
+        post_conv_layers (int, optional): 
+            Number of linear layers to transform the final node embedding before prediction. Defaults to 2.
 
+    Attributes:
+        pre_conv_nodes (torch.nn.ModuleList): 
+            Linear layers for node feature transformation prior to GAT.
+        pre_conv_edges (torch.nn.ModuleList): 
+            Linear layers for edge feature transformation prior to GAT.
+        embedding_att_convs (torch.nn.ModuleList): 
+            List of GATv2Conv layers for local attention.
+        embedding_gate (torch.nn.ModuleList): 
+            Gate layers (GRUCell or GLU) applied after local attention.
+        embedding_norms (torch.nn.ModuleList): 
+            Normalization layers (e.g., LayerNorm or DiffGroupNorm) for each local attention layer.
+        global_conv (GATv2Conv): 
+            Single-head GAT layer for global attention via a super-node approach.
+        global_gate (torch.nn.Module): 
+            Gate for global attention (GRUCell or GLU).
+        global_norm (torch.nn.Module): 
+            Normalization layer applied after global attention pooling.
+        post_conv_hidden (torch.nn.ModuleList): 
+            Linear layers after attention layers for further transformation.
+        output_layer (torch.nn.Linear): 
+            Final linear layer to generate classification or regression outputs.
+
+    Returns:
+        torch.Tensor: Model output of shape (batch_size, out_channels), or a flattened shape (batch_size,) for a single output dimension.
     """
     def __init__(
         self,
@@ -74,20 +130,18 @@ class GATom(torch.nn.Module):
         hidden_channels: int,
         out_channels: int,
         edge_dim: int,
-        layers_attention: int,
-        num_timesteps: int,
-        recurrent_cell: str = 'gru',
+        pre_conv_layers: int = 1,
+        layers_attention: int = 4,
+        post_conv_layers: int = 2,
         activation_cell: str = 'elu',
         pooling: str = 'global_add_pool',
         aggregation: str = 'add',
         activation: str = 'silu',
         heads: int = 1,
         residual_connection: bool = False,
-        glu_over_gru: bool = False,
         task: str = 'regression',
         dropout: float = 0.0,
-        pre_conv_layers: int = 1,
-        post_conv_layers: int = 2,
+
     ):
         super().__init__()
 
@@ -96,15 +150,12 @@ class GATom(torch.nn.Module):
         self.out_channels = out_channels
         self.edge_dim = edge_dim 
         self.layers_attention = layers_attention
-        self.num_timesteps = num_timesteps
         self.dropout = dropout
         self.heads = heads
         self.res_connection = residual_connection
-        self.glu_over_gru = glu_over_gru
         self.task = task
         self.pooling = pooling
         self.activation = activation 
-        self.recurrent_cell_class = recurrent_cell_classes.get(recurrent_cell.lower()) if recurrent_cell is not None else None
         self.activation_cell = activation_cell
         self.pre_conv_layers = pre_conv_layers
         self.post_conv_layers = post_conv_layers
@@ -131,28 +182,26 @@ class GATom(torch.nn.Module):
                 self.pre_conv_nodes.append(Linear(hidden_channels, hidden_channels))
                 self.pre_conv_edges.append(Linear(hidden_channels, hidden_channels))
 
+        #################################################################
         # Local attention
         self.embedding_att_convs = torch.nn.ModuleList()
         self.embedding_gate = torch.nn.ModuleList()
         self.embedding_norms = torch.nn.ModuleList()
         for _ in range(self.layers_attention - 1):
-            
+
+            #norm layer  
+            #self.embedding_norms.append(DiffGroupNorm(hidden_channels, groups=10))
+            self.embedding_norms.append(LayerNorm(hidden_channels))
+
             self.embedding_att_convs.append(GATv2Conv(hidden_channels, hidden_channels, heads = self.heads, dropout=dropout,
                                             add_self_loops=False, negative_slope=0.01, edge_dim=hidden_channels,
                                             aggr = self.aggregation))
-
             # The output of the GATv2Conv has dimensions (N, out_channels * heads)
-            self.embedding_norms.append(DiffGroupNorm(hidden_channels * self.heads, groups=10))
-            if self.glu_over_gru:
-                # the input dimension will be dim(x) + dim(h) = hidden_channels +  hidden_channels * heads = hidden_channels * (heads + 1)
-                self.embedding_gate.append(GeneralGLU(hidden_channels * (self.heads + 1), hidden_channels, activation = self.activation_cell))
-            else:
-                # We need to properly set up the dimensions of the h state in the GRUCell
-                self.embedding_gate.append(self.recurrent_cell_class(hidden_channels * self.heads, hidden_channels))
-                if self.recurrent_cell_class is None:
-                    raise ValueError(f"Unknown recurrent cell: {self.recurrent_cell}")
+            # the input dimension will be dim(x) + dim(h) = hidden_channels +  hidden_channels * heads = hidden_channels * (heads + 1)
+            self.embedding_gate.append(GeneralGLU(hidden_channels * (self.heads + 1), hidden_channels, activation = self.activation_cell))
             
-
+            
+        #################################################################
         # Global attention
         # In order to have a global attention we need to add a super node to the graph
         # We add a super node to the graph with only one head of attention
@@ -160,11 +209,9 @@ class GATom(torch.nn.Module):
         self.global_conv = GATv2Conv(hidden_channels, hidden_channels, heads = 1, dropout=dropout,
                                     add_self_loops=False, negative_slope=0.01, edge_dim=hidden_channels,
                                     aggr = self.aggregation)
-        if self.glu_over_gru:
-            self.global_gate = GeneralGLU(2 * hidden_channels, hidden_channels, activation = self.activation_cell)
-        else:
-            self.global_gate = self.recurrent_cell_class(hidden_channels, hidden_channels)
-        self.global_norm = DiffGroupNorm(hidden_channels, groups=10)
+        self.global_gate = GeneralGLU(2 * hidden_channels, hidden_channels, activation = self.activation_cell)
+        #self.global_norm = DiffGroupNorm(hidden_channels, groups=10)
+        self.global_norm = LayerNorm(hidden_channels)
 
         #################################################################
         # Readout block
@@ -183,9 +230,9 @@ class GATom(torch.nn.Module):
             pre_conv_node.reset_parameters()
             pre_conv_edge.reset_parameters()
 
-        for att_conv, gru, norm in zip(self.embedding_att_convs, self.embedding_gate, self.embedding_norms):
+        for att_conv, gate, norm in zip(self.embedding_att_convs, self.embedding_gate, self.embedding_norms):
             att_conv.reset_parameters()
-            gru.reset_parameters()
+            gate.reset_parameters()
             norm.reset_parameters()
 
         for hidden_layer in self.post_conv_hidden:
@@ -205,63 +252,27 @@ class GATom(torch.nn.Module):
         for index_layer, (att_conv, gate, norm) in enumerate(zip(self.embedding_att_convs, self.embedding_gate, self.embedding_norms)):
             # we follow the skip connection (Res+) strategy
             # Normalization -> Activation -> Dropout -> Conv -> Res
-            # Conv :  GAT + GLU/GRU -> g_l := Conv(x_l)
+            # Conv :  GAT + GLU -> g_l := Conv(x_l)
             # Res+ : x_l = g_{l-1} + x_{l-1}
             if self.res_connection:
-                if self.glu_over_gru:
-                    x = getattr(F, self.activation)(x)
-                    x = F.dropout(x, p=self.dropout, training=self.training)
-                    g = norm(att_conv(x, edge_index, edge_attr))
-                    X = gate(torch.cat([x, g], dim=-1))
-                    x = x + X
-                else:
-                    g = norm(x)
-                    g = F.relu(x)
-                    g = F.dropout(g, p=self.dropout, training=self.training)
-                    for t in range(self.num_timesteps):
-                        h = getattr(F, self.activation_cell)(att_conv(g, edge_index, edge_attr))
-                        g = gate(h, g).relu()
-                    x = x + g
-                    x = norm(x)
-                ## Res connection
-                # Conv -> Norm -> activation -> Res
-                # if self.glu_over_gru:
-                #     h = att_conv(x, edge_index, edge_attr)
-                #     g = gate(torch.cat([x, h], dim=-1)) 
-                #     g = norm(g)
-                #     x = x + F.relu_(g)
-                # else:
-                #     for t in range(self.num_timesteps):
-                #         h = getattr(F, self.activation_cell)(att_conv(x, edge_index, edge_attr))
-                #         h = F.dropout(h, p=self.dropout, training=self.training)
-                #         g = gate(h, x).relu()
-                #         g = norm(g)
-                #         x = x + F.relu(g)
+                x = norm(x)
+                x = getattr(F, self.activation)(x)
+                x = F.dropout(x, p=self.dropout, training=self.training)
+                g = att_conv(x, edge_index, edge_attr)
+                X = gate(torch.cat([x, g], dim=-1))
+                x = x + X
             else:
-                if self.glu_over_gru:
-                    h = norm(att_conv(x, edge_index, edge_attr))
-                    x = gate(torch.cat([x, h], dim=-1))
-                else:
-                    for t in range(self.num_timesteps):
-                        h = getattr(F, self.activation_cell)(att_conv(x, edge_index, edge_attr))
-                        h = F.dropout(h, p=self.dropout, training=self.training)
-                        x = gate(h, x).relu()
-                        x = norm(x)
+                x = norm(x)
+                g = att_conv(x, edge_index, edge_attr)
+                x = gate(torch.cat([x, g], dim=-1))
 
         # Global attention
         row = torch.arange(batch.size(0), device=batch.device)
         edge_index = torch.stack([row, batch], dim=0)
 
         out = getattr(torch_geometric.nn, self.pooling)(x, batch).relu()
-        if self.glu_over_gru: 
-            h = self.global_conv((x, out), edge_index)
-            out = self.global_gate(torch.cat([out, h], dim=-1))
-        else:
-            for t in range(self.num_timesteps):
-                h = getattr(F, self.activation_cell)(self.global_conv((x, out), edge_index))
-                h = F.dropout(h, p=self.dropout, training=self.training)
-                out = self.global_gate(h, out).relu()
-
+        g = self.global_conv((x, out), edge_index)
+        out = self.global_gate(torch.cat([out, g], dim=-1))
         x = self.global_norm(out)
 
         # Readout block
@@ -291,7 +302,6 @@ class GATom(torch.nn.Module):
                 f'layers_attention={self.layers_attention},'
                 f'pre_conv_layers={self.pre_conv_layers},'
                 f'post_conv_layers={self.post_conv_layers},'
-                f'num_timesteps={self.num_timesteps},'
                 f'aggregation={self.aggregation},'
                 f'heads={self.heads},'
                 f'residual_connection={self.res_connection},'
@@ -299,7 +309,6 @@ class GATom(torch.nn.Module):
                 f'task={self.task},'
                 f'pooling={self.pooling},'
                 f'activation={self.activation},'
-                f'recurrent_cell={self.recurrent_cell_class.__name__}'
                 f'activation_cell={self.activation_cell}'
                 f')')
     
@@ -311,10 +320,9 @@ class GATom(torch.nn.Module):
             f"    hidden_channels      = {self.hidden_channels},\n"
             f"    out_channels         = {self.out_channels},\n"
             f"    edge_dim             = {self.edge_dim},\n"
-            f"    layers_attention     = {self.layers_attention},\n"
             f"    pre_conv_layers      = {self.pre_conv_layers},\n"
+            f"    layers_attention     = {self.layers_attention},\n"
             f"    post_conv_layers     = {self.post_conv_layers},\n"
-            f"    num_timesteps        = {self.num_timesteps},\n"
             f"    aggregation          = {self.aggregation},\n"
             f"    heads                = {self.heads},\n"
             f"    residual_connection  = {self.res_connection},\n"
@@ -322,9 +330,7 @@ class GATom(torch.nn.Module):
             f"    task                 = {self.task},\n"
             f"    pooling              = {self.pooling},\n"
             f"    activation           = {self.activation},\n"
-            f"    glu_over_gru         = {self.glu_over_gru},\n"
-            f"    gate                 = {f"GeneralGLU" if self.glu_over_gru else self.recurrent_cell_class.__name__}\n"
-            f"    activation_cell      = {self.activation_cell}\n"
+            f"    gate                 = {f"GLU with {self.activation_cell}"}\n"
             f")"
         )
 
@@ -342,7 +348,6 @@ class GATom(torch.nn.Module):
             "layers_attention" : self.layers_attention,
             "pre_conv_layers" : self.pre_conv_layers,
             "post_conv_layers" : self.post_conv_layers,
-            "num_timesteps" : self.num_timesteps,
             "aggregation" : self.aggregation,
             "heads" : self.heads,
             "res_connection" : self.res_connection,
@@ -350,7 +355,5 @@ class GATom(torch.nn.Module):
             "task" : self.task,
             "pooling" : self.pooling,
             "activation" : self.activation,
-            "glu_over_gru" : self.glu_over_gru,
-            "recurrent_cell" : "GeneralGLU" if self.glu_over_gru else self.recurrent_cell_class.__name__,
             "activation_cell" : self.activation_cell
         }

@@ -1,30 +1,30 @@
 Model Parameters:
-  batch_size: 64
+  batch_size: 128
   bool_plot: true
   early_stopping: false
   graph_algorithm: KNN
   internal_params:
-    activation: silu
-    aggregation: mean
-    dropout: 0.34632083962400245
+    activation: relu
+    aggregation: add
+    dropout: 0.6667097102251842
     glu_over_gru: true
     heads: 3
-    hidden_channels: 100
+    hidden_channels: 175
     layers_attention: 3
     num_timesteps: 1
-    pooling: global_add_pool
+    pooling: global_mean_pool
     post_conv_layers: 3
     pre_conv_layers: 1
     recurrent_cell: null
     residual_connection: false
-    task: regression
+    task: classification
   name: GATom
   num_workers: 4
 Optimizer Parameters:
   name: AdamW
   params:
-    lr: 0.0007219634214086826
-    weight_decay: 0.02835682945151982
+    lr: 0.0005710843995353203
+    weight_decay: 0.0036308331516633884
 Scheduler Parameters:
   name: ReduceLROnPlateau
   params:
