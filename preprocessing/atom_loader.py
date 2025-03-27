@@ -1,14 +1,14 @@
+import json
 from typing import List, Dict, AnyStr, Union
 
 import numpy as np
-import json
 from pymatgen.core import Structure
 from tqdm import tqdm
 
 from torch.nn.functional import one_hot
 from torch import arange as torch_arange
 
-class AtomLoader: 
+class AtomLoader:
     """
     Class to load atom information from a dataset.
     """

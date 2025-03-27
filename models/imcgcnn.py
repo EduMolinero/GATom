@@ -1,47 +1,13 @@
-import time
 from typing import Tuple, Union
 
 import torch
 import torch.nn.functional as F
+from torch import Tensor
 
 import torch_geometric
-import torch_geometric.transforms as T
-from torch_geometric.nn import GATConv, GATv2Conv, SuperGATConv, GCNConv, BatchNorm, GraphNorm, DiffGroupNorm
-from torch_geometric.loader import DataLoader
-from typing import Optional
-                    
-from torch import Tensor
-from torch.nn import GRUCell, Linear, Parameter
-
-
-from torch_geometric.nn import GATConv, MessagePassing, global_add_pool, global_mean_pool, global_max_pool
-from torch_geometric.nn.inits import glorot, zeros
-from torch_geometric.utils import softmax
-from torch_geometric.typing import Adj, OptTensor, PairTensor, PairOptTensor, Tensor
-
-import math
-from typing import Optional
-
-import torch
-import torch.nn.functional as F
-from torch import Tensor
-from torch.nn import Parameter
-
-from torch_geometric.nn.conv import MessagePassing
+from torch_geometric.nn import MessagePassing, BatchNorm
+from torch_geometric.typing import Adj, OptTensor, Tensor
 from torch_geometric.nn.dense.linear import Linear
-from torch_geometric.nn.inits import glorot, zeros
-from torch_geometric.typing import Adj, OptTensor, SparseTensor, torch_sparse
-from torch_geometric.utils import (
-    add_self_loops,
-    batched_negative_sampling,
-    dropout_edge,
-    is_undirected,
-    negative_sampling,
-    remove_self_loops,
-    softmax,
-    to_undirected,
-)
-
 
 
 class NodeConv(MessagePassing):
@@ -70,13 +36,20 @@ class NodeConv(MessagePassing):
             self.in_channels, self.out_channels = channels
         
         # in_dimension --> sum over all due to concatenation of inputs into z_ij := xi + xj + eij
-        self.lin_conv = Linear(self.in_channels + self.out_channels + self.edge_dim, self.out_channels, 
-                                bias = self.bias, weight_initializer='glorot')
-        self.lin_softmax = Linear(self.in_channels + self.out_channels + self.edge_dim, self.out_channels, 
-                                bias = self.bias, weight_initializer='glorot')
-
-        self.linear_edge = Linear(self.in_channels + self.out_channels + self.edge_dim, self.out_channels, 
-                                  bias = self.bias, weight_initializer='glorot')
+        self.lin_conv = Linear(self.in_channels + self.out_channels + self.edge_dim,
+                               self.out_channels,
+                               bias = self.bias,
+                               weight_initializer='glorot'
+                            )
+        self.lin_softmax = Linear(self.in_channels + self.out_channels + self.edge_dim,
+                                  self.out_channels,
+                                  bias = self.bias,
+                                  weight_initializer='glorot'
+                                )
+        self.linear_edge = Linear(self.in_channels + self.out_channels + self.edge_dim, self.out_channels,
+                                  bias = self.bias,
+                                  weight_initializer='glorot'
+                                )
         self.batch_norm = torch.nn.BatchNorm1d(self.out_channels) if self.normalize_batch else None
         self.reset_parameters()
 
@@ -125,8 +98,11 @@ class EdgeUpdate(MessagePassing):
             self.in_channels, self.out_channels = channels
 
         # in_dimension --> sum over all due to concatenation of inputs into z_ij := xi + xj + eij
-        self.linear = Linear(self.in_channels + self.out_channels + self.edge_dim, self.out_channels, 
-                                bias = self.bias, weight_initializer='glorot')
+        self.linear = Linear(self.in_channels + self.out_channels + self.edge_dim, 
+                             self.out_channels,
+                             bias = self.bias,
+                             weight_initializer='glorot'
+                            )
         self.batch_norm = torch.nn.BatchNorm1d(self.out_channels) if self.normalize_batch else None
         self.reset_parameters()
 
@@ -211,12 +187,10 @@ class IMcgcnn(torch.nn.Module):
         for _ in range(self.post_conv_layers):
             self.post_conv_hidden.append(Linear(hidden_channels, hidden_channels))
         self.output_layer = Linear(hidden_channels, out_channels)
-        
         self.reset_parameters()
 
 
-    def reset_parameters(self):
-        
+    def reset_parameters(self):     
         for pre_conv_node, pre_conv_edge in zip(self.pre_conv_nodes, self.pre_conv_edges):
             pre_conv_node.reset_parameters()
             pre_conv_edge.reset_parameters()
@@ -231,9 +205,6 @@ class IMcgcnn(torch.nn.Module):
         self.output_layer.reset_parameters()
 
     def forward(self, x: Tensor, edge_index: Tensor, edge_attr: OptTensor, batch: Tensor) -> Tensor:
-        """
-        """
-
         # Setup input features
         for pre_node, pre_edge in zip(self.pre_conv_nodes, self.pre_conv_edges):
             x = getattr(F, self.activation)(pre_node(x))
@@ -269,18 +240,15 @@ class IMcgcnn(torch.nn.Module):
 
         # pooling setup --> Only for nodes
         x = getattr(F, self.activation)(self.pre_pool_layer(x))
-        #edge_attr = getattr(F, self.activation)(self.out_edges(edge_attr))
         # Pooling
         x = getattr(torch_geometric.nn, self.pooling)(x, batch)
-        #x = F.dropout(x, p=self.dropout, training=self.training)
         # Final layers
         for hidden_layer in self.post_conv_hidden:
             x = getattr(F, self.activation)(hidden_layer(x))
-            #x = F.dropout(x, p=self.dropout, training=self.training)
 
         # Predictor:
         if self.task == 'classification':
-            x = F.log_softmax(self.output_layer(x), dim=self.out_channels)
+            x = F.sigmoid(self.output_layer(x))
         elif self.task == 'regression':
             x = self.output_layer(x)
         else:

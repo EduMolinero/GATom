@@ -1,17 +1,14 @@
-
-import numpy as np
-import pandas as pd
-
 import sys
 import os
 import time
 from datetime import datetime
 
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 import torch
 import torch.nn.functional as F
-
 from torch_geometric.loader import DataLoader
 from sklearn.metrics import roc_auc_score
 
@@ -20,15 +17,15 @@ class Normalizer:
     def __init__(self, mean, std):
         self.mean = mean
         self.std = std
-    
+
     def normalize(self, data):
         data = (data - self.mean) / self.std
         return data
-    
+
     def denormalize(self, data):
         data = (data * self.std) + self.mean
         return data
-    
+
     def __repr__(self):
         return f"Mean: {self.mean}, Std: {self.std}"
 
@@ -38,8 +35,8 @@ class EarlyStopper:
             patience : int = 1,
             min_delta: float = 0.0,
             cumulative_delta: bool = False
-            ):
-        
+        ) -> None:
+       
         self.patience = patience
         self.min_delta = min_delta
         self.cumulative_delta = cumulative_delta
@@ -129,7 +126,6 @@ class Trainer:
         if self.rank == 0:
             print(f"Epoch {epoch} | Training checkpoint saved at {PATH}")
 
-
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
         return param_group['lr']
@@ -138,14 +134,13 @@ def get_weight_decay(optimizer):
     for param_group in optimizer.param_groups:
         return param_group['weight_decay']
 
-def bytes_to(bytes, to, bsize=1024): 
+def bytes_to(bytes, to, bsize=1024):
     a = {'k' : 1, 'm': 2, 'g' : 3, 't' : 4, 'p' : 5, 'e' : 6 }
     return bytes / (bsize ** a[to])
 
-
 def train_model(
         model,
-        optimizer, 
+        optimizer,
         train_loader : DataLoader,
         validation_loader : DataLoader,
         test_loader : DataLoader,
@@ -177,9 +172,8 @@ def train_model(
             print("Starting training...")
             print("Remainder: All losses/errors are given in standirized units [ std. units ]")
             sys.stdout.flush()
-            
 
-        start_epoch = time.time() 
+        start_epoch = time.time()
         loss = trainer.training(train_loader, model, optimizer)
 
         if trainer.rank == 0:
@@ -218,7 +212,7 @@ def train_model(
                 print(f"        --> Early stopping at epoch {epoch} <--")
                 sys.stdout.flush()
                 break
-            
+
 
         if distributed:
             torch.distributed.barrier()
@@ -230,7 +224,9 @@ def train_model(
 
     cuda_max_mem = bytes_to(torch.cuda.max_memory_allocated(), 'g')
     if trainer.rank == 0:
-        print(f"Total time: {time.time() - start:.4f} seconds || {(time.time() - start)/60 :.4f} minutes || {(time.time() - start)/3600 :.4f} hours")
+        print(
+            f"Total time: {time.time() - start:.4f} seconds || {(time.time() - start)/60 :.4f} minutes || {(time.time() - start)/3600 :.4f} hours"
+        )
         print(f"Mean time per epoch: {mean_time/trainer.epochs:.4f} seconds")
         print("Best validation error: ", best_val_error)
         if normalizer is not None:
@@ -258,18 +254,14 @@ def train_model(
                 ax.grid()
                 ax.legend()
                 fig.savefig('accuracy.png')
-                try:
-                    np.savetxt('loss.txt', np.column_stack((t, loss_epoch)))
-                    np.savetxt('val.txt', np.column_stack((t, val_epoch)))
-                    np.savetxt('test.txt', np.column_stack((t, test_epoch)))
-                except:
-                    print("Error saving the files")
-                    sys.stdout.flush()
+                np.savetxt('loss.txt', np.column_stack((t, loss_epoch)))
+                np.savetxt('val.txt', np.column_stack((t, val_epoch)))
+                np.savetxt('test.txt', np.column_stack((t, test_epoch)))
             else:
                 fig, axs = plt.subplots(1,2)
                 axs[0].plot(t, loss_epoch, label='Cross-entropy')
                 axs[0].set(xlabel='Epoch', ylabel='Loss')
-                
+
                 axs[1].plot(t, val_epoch, label='Validation')
                 axs[1].plot(t, test_epoch, label='Test')
                 axs[1].set(xlabel='Epoch', ylabel='AUC')
@@ -297,7 +289,6 @@ def train_model(
                 'weight_decay': get_weight_decay(optimizer), 
                 'date' : datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
-        
         pd.DataFrame(dict_model, index=[0]).to_csv('results.csv', mode='a')
 
     return best_val_error, best_test_error

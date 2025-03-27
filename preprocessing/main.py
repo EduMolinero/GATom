@@ -1,5 +1,5 @@
-from AtomLoader import *
 import os
+from preprocessing.atom_loader import AtomLoader
 
 def main(working_dir: str, dataset: str):
     """
@@ -17,8 +17,8 @@ def main(working_dir: str, dataset: str):
     )
 
 if __name__ == '__main__':
-    store = 'path/to/storage/' #change as needed
-    working_dir = os.path.join(store, 'datasets/matbench')
+    STORE = 'path/to/storage/' #change as needed
+    working_dir = os.path.join(STORE, 'datasets/matbench')
     datasets = ['mp_e_form', 'mp_gap', 'mp_is_metal',  'perovskites'] # add more if needed
     for dataset in datasets:
         print('---------------------------------')

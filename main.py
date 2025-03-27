@@ -1,14 +1,13 @@
 import time
-import os.path as osp
-import time
-import numpy as np
 import sys
-import os
 import argparse
-import yaml
 import random
-import itertools    
+import itertools
+import os
+import os.path as osp
 
+import yaml
+import numpy as np
 import torch
 
 from torch_geometric.loader import DataLoader
@@ -16,10 +15,6 @@ from torch_geometric.loader import DataLoader
 import models
 from data import MatbenchDataset
 from training import Trainer, train_model, Normalizer
-
-
-import ray
-from ray import tune
 
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel 
@@ -88,9 +83,6 @@ def load_dataset(rank, path_dataset, len_dataset = 30000, name = 'mp_gap', graph
 
 
 def split_datasets(dataset, rank):
-
-    # TO DO: Implement this using N CV-fold validation
-
     # Ratios: 80% train, 10% validation, 10% test
     train_ratio, valid_ratio, test_ratio = 0.8, 0.1, 0.1
     dataset_size = len(dataset)
@@ -124,69 +116,67 @@ def training_loader_ddp(rank, world_size, train_dataset, batch_size, num_workers
     return train_loader
 
 def training_loader_no_ddp( train_dataset, batch_size, num_workers = 2, gpu_bool = True):
-    pin_memory = True if gpu_bool else False   
-
-    train_loader = DataLoader(train_dataset, 
+    pin_memory = bool(gpu_bool)
+    train_loader = DataLoader(train_dataset,
                                batch_size = batch_size,
                                pin_memory=pin_memory,
                                num_workers=num_workers
-                            )
-
+                             )
     return train_loader
 
 def val_test_loaders_no_ddp(val_dataset, test_dataset, batch_size, num_workers = 2, gpu_bool = True):
-
-    # validation and evaluation only takes place on rank 0, so there is no need to load the data in parallel
-
-    pin_memory = True if gpu_bool else False
-
+    # validation and evaluation only takes place on rank 0,
+    # so there is no need to load the data in parallel
+    pin_memory = bool(gpu_bool)
     val_loader = DataLoader(val_dataset, 
-                            batch_size = batch_size, 
-                            pin_memory=pin_memory, 
-                            num_workers=num_workers, 
+                            batch_size = batch_size,
+                            pin_memory=pin_memory,
+                            num_workers=num_workers,
                             shuffle=False
                             )
     test_loader = DataLoader(test_dataset, 
-                             batch_size = batch_size, 
-                             pin_memory=pin_memory, 
-                             num_workers=num_workers, 
+                             batch_size = batch_size,
+                             pin_memory=pin_memory,
+                             num_workers=num_workers,
                              shuffle=False
                              )
-    
     return val_loader, test_loader
 
 def cleanup():
     dist.destroy_process_group()
 
-
 def setup():
     dist.init_process_group(backend="nccl")
     if int(os.environ["RANK"]) == 0:
-           print("Distributed DDP initialized")
+        print("Distributed DDP initialized")
 
-def training_no_ddp(model_params, 
+def training_no_ddp(model_params,
                     optimizer_params,
                     scheduler_params,
                     ):
     # Set the device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     gpu_bool = True if device != "cpu" else False
-    dataset = load_dataset(0, 
+    dataset = load_dataset(0,
                             model_params["path_dataset"],
-                            len_dataset = model_params["len_dataset"], 
-                            name=model_params["name_dataset"], 
+                            len_dataset = model_params["len_dataset"],
+                            name=model_params["name_dataset"],
                             graph_algorithm=model_params["graph_algorithm"],
                             cell_type = 'UnitCell'
                             )
     train_dataset, val_dataset, test_dataset = split_datasets(dataset, 0)
     train_loader = training_loader_no_ddp(train_dataset, 
-                                        model_params["batch_size"], 
-                                        num_workers = model_params["num_workers"], 
+                                        model_params["batch_size"],
+                                        num_workers = model_params["num_workers"],
                                         gpu_bool = gpu_bool
                                        )
 
-    val_loader, test_loader = val_test_loaders_no_ddp(val_dataset, test_dataset, model_params["batch_size"], 
-                                                          num_workers = model_params["num_workers"], gpu_bool = gpu_bool)
+    val_loader, test_loader = val_test_loaders_no_ddp(val_dataset,
+                                                      test_dataset,
+                                                      model_params["batch_size"],
+                                                      num_workers = model_params["num_workers"],
+                                                      gpu_bool = gpu_bool
+                                                      )
 
     if model_params["internal_params"]["task"] == 'regression':
         # Normalize targets to mean = 0 and std = 1.
@@ -206,7 +196,6 @@ def training_no_ddp(model_params,
 
     loss_function = 'mse_loss' if model_params["internal_params"]["task"] == 'regression' else 'binary_cross_entropy'
     eval_metric = 'l1_loss' if model_params["internal_params"]["task"] == 'regression' else 'auc'
-
     try:
         # this is done to avoid errors when we have several workers
         model_class = getattr(models, model_params["name"])
@@ -215,7 +204,6 @@ def training_no_ddp(model_params,
         print(f"Params: {model_params}")
         raise ValueError("Model not implemented!")
 
-    
     optimizer = getattr(torch.optim, optimizer_params["name"])(
         model.parameters(),
         **optimizer_params["params"]
@@ -234,15 +222,16 @@ def training_no_ddp(model_params,
                        'eval_metric': eval_metric,
                         })
     
-    best_val_error, best_test_error = train_model(model, optimizer, 
-                                                train_loader, val_loader, test_loader,
-                                                trainer, 
+    best_val_error, best_test_error = train_model(model, optimizer,
+                                                train_loader,
+                                                val_loader,
+                                                test_loader,
+                                                trainer,
                                                 scheduler=scheduler,
                                                 normalizer=normalizer,
-                                                early_stopping = model_params["early_stopping"], 
-                                                bool_plot = model_params["bool_plot"], 
+                                                early_stopping = model_params["early_stopping"],
+                                                bool_plot = model_params["bool_plot"],
                                     )
-    
 
     if normalizer is not None:
         print(f"{'Best validation error:':25} {normalizer.std.item() * best_val_error:>15.6f} [Physical units] \t||\t {best_val_error:>15.6f} [std. units]")
@@ -252,14 +241,14 @@ def training_no_ddp(model_params,
     else:
         print("Best validation error: ", best_val_error)
         print("Best test error: ", best_test_error)
-    
+
     return best_val_error, best_test_error
 
 def objective(
     config,
     model_params,
     optimizer_params,
-    scheduler_params, 
+    scheduler_params,
 
 ):
     # Update model parameters
@@ -346,15 +335,14 @@ def hyperparam_optim(args):
             # Model hyperparams
             "hidden_channels": tune.choice(dim),
             "layers_attention": tune.choice(layers),
-            "pre_conv_layers": 1,  #tune.choice([1, 2, 3]), we found 1 to be the best
-            "post_conv_layers": 3,   #tune.choice([1, 2, 3]),
+            "pre_conv_layers": 1, 
+            "post_conv_layers": 3,   
             "dropout": tune.uniform(0.0, 0.9),
             "heads": tune.choice([1, 2, 3, 4]),
             "aggregation": tune.choice(["mean", "add", "max", "softmax"]),
             "pooling": tune.choice(["global_mean_pool", "global_add_pool", "global_max_pool"]),
             "activation": tune.choice(["relu", "leaky_relu", "sigmoid", "silu"]), 
-            "activation_cell": tune.choice(["relu", "gelu", "silu", "sigmoid"]), # this translates into ReGLU, GeGLU, SiGLU, and GLU (with sigmoid)
-            
+            "activation_cell": tune.choice(["relu", "gelu", "silu", "sigmoid"]), # ReGLU, GeGLU, SiGLU, and GLU (with sigmoid)    
             # Graph & batch size
             "graph_algorithm": tune.choice(["KNN", "Voronoi"]),
             "batch_size": tune.choice(batch_sizes),
@@ -374,7 +362,7 @@ def hyperparam_optim(args):
             "dropout": tune.uniform(0.0, 0.9),
             "pooling": tune.choice(["global_mean_pool", "global_add_pool", "global_max_pool"]),
             "activation": tune.choice(["relu", "leaky_relu", "sigmoid"]),
-            
+
             # Graph & batch size
             "graph_algorithm": tune.choice(["KNN", "Voronoi"]),
             "batch_size": tune.choice([8, 16, 32, 64, 128]),
@@ -401,9 +389,15 @@ def hyperparam_optim(args):
     # Init ray for slurm
     if torch.cuda.is_available():
         if torch.cuda.device_count() > 2:
-            ray.init(ignore_reinit_error=True, num_cpus=12*torch.cuda.device_count(), num_gpus=torch.cuda.device_count())
+            ray.init(ignore_reinit_error=True,
+                     num_cpus=12*torch.cuda.device_count(),
+                     num_gpus=torch.cuda.device_count()
+                     )
         elif torch.cuda.device_count() <= 2:
-            ray.init(ignore_reinit_error=True, num_cpus=32*torch.cuda.device_count(), num_gpus=torch.cuda.device_count())
+            ray.init(ignore_reinit_error=True,
+                     num_cpus=32*torch.cuda.device_count(),
+                     num_gpus=torch.cuda.device_count()
+                     )
     else:
         print("Using local_mode for ray. This is meant for debugging purposes.")
         ray.init(ignore_reinit_error=True, local_mode=True, num_cpus=1, num_gpus=0)
@@ -442,9 +436,9 @@ def hyperparam_optim(args):
 
     tuner = Tuner(
         trainable=trainable,
-        param_space=search_space[model_params["name"]], 
+        param_space=search_space[model_params["name"]],
         tune_config=TuneConfig(
-            num_samples=args.ntrials,  
+            num_samples=args.ntrials,
             search_alg=search_algorithm,
             scheduler=scheduler,
             trial_name_creator=trial_count_number,
@@ -471,7 +465,6 @@ def hyperparam_optim(args):
     # Now sort trials from minimum to maximum loss
     df = results.get_dataframe()
     df.to_csv("results.csv")
-    
     df_sorted = df.sort_values(by=metric, ascending=True)
     print(df_sorted.to_string())
 
@@ -522,49 +515,49 @@ if __name__ == '__main__':
 
     parser.add_argument(
         "--no-cuda",                 
-        action="store_true", 
-        default=False, 
+        action="store_true",
+        default=False,
         help="Disable CUDA training."
     )
     parser.add_argument(
         '--calculation_type', 
-        type=str, 
-        default='single_calc', 
+        type=str,
+        default='single_calc',
         help='Single calculation or hyperparameter optimization.'
     )
     parser.add_argument(
         '--ddp', 
-        action="store_true", 
-        default=False, 
+        action="store_true",
+        default=False,
         help='Whether to use DDP or not'
     )
     parser.add_argument(
         '--name_dataset', 
-        type=str, 
-        default='mp_gap', 
+        type=str,
+        default='mp_gap',
         help='Name of the dataset to use'
     )
     parser.add_argument(
         '--path_dataset', 
-        type=str, 
-        default='data', 
+        type=str,
+        default='data',
         help='Path to the dataset'
     )
     parser.add_argument(
         '--task', 
-        type=str, 
-        default='regression', 
+        type=str,
+        default='regression',
         help='Task to do for that dataset: regression or classification'
     )
     parser.add_argument(
         '--model_name', 
-        type=str, 
-        default='GATom', 
+        type=str,
+        default='GATom',
         help='Name of the model to use. Current options are GATom or IMcgcnn'
     )
     parser.add_argument(
         '--epochs', 
-        type=int, 
+        type=int,
         help='Total epochs to train the model'
     )
     parser.add_argument(
@@ -573,32 +566,32 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--ntrials', 
-        default=0, 
-        type=int, 
+        default=0,
+        type=int,
         help='Number of trials to run for the hyperparameter optimization'
     )
     parser.add_argument(
         '--num_workers', 
         default=2,  # 2 workers for the dataloader. see ml-engineering repo
-        type=int, 
+        type=int,
         help='Number of workers to load the data'
     )
     parser.add_argument(
         '--torch_compile', 
-        action="store_true", 
-        default=False, 
+        action="store_true",
+        default=False,
         help='Whether to use torch.compile or not'
     )
     parser.add_argument(
         '--use_matf32', 
-        action="store_true", 
-        default=False, 
+        action="store_true",
+        default=False,
         help='Whether to use matf32 or not'
     )
     parser.add_argument(
         '--fix_seed', 
-        action="store_true", 
-        default=False, 
+        action="store_true",
+        default=False,
         help='Whether to fix a seed for reproducibility'
     )
 

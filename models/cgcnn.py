@@ -1,46 +1,14 @@
-import time
 from typing import Tuple, Union
 
 import torch
 import torch.nn.functional as F
+from torch import Tensor
 
 import torch_geometric
-import torch_geometric.transforms as T
-from torch_geometric.nn import GATConv, GATv2Conv, SuperGATConv, GCNConv, BatchNorm, GraphNorm, DiffGroupNorm
-from torch_geometric.loader import DataLoader
-from typing import Optional
-                    
-from torch import Tensor
-from torch.nn import GRUCell, Linear, Parameter
-
-
-from torch_geometric.nn import GATConv, MessagePassing, global_add_pool, global_mean_pool, global_max_pool
-from torch_geometric.nn.inits import glorot, zeros
-from torch_geometric.utils import softmax
-from torch_geometric.typing import Adj, OptTensor, PairTensor, PairOptTensor, Tensor
-
-import math
-from typing import Optional
-
-import torch
-import torch.nn.functional as F
-from torch import Tensor
-from torch.nn import Parameter
-
-from torch_geometric.nn.conv import MessagePassing
+from torch_geometric.nn import MessagePassing
+from torch_geometric.typing import Adj, OptTensor, Tensor
 from torch_geometric.nn.dense.linear import Linear
-from torch_geometric.nn.inits import glorot, zeros
-from torch_geometric.typing import Adj, OptTensor, SparseTensor, torch_sparse
-from torch_geometric.utils import (
-    add_self_loops,
-    batched_negative_sampling,
-    dropout_edge,
-    is_undirected,
-    negative_sampling,
-    remove_self_loops,
-    softmax,
-    to_undirected,
-)
+
 
 
 class NodeConv(MessagePassing):
@@ -68,16 +36,23 @@ class NodeConv(MessagePassing):
         if isinstance(channels, int):
             self.in_channels, self.out_channels = channels, channels
         else:
-            self.in_channels, self.out_channels = channels
-        
+            self.in_channels, self.out_channels = channels   
         # in_dimension --> sum over all due to concatenation of inputs into z_ij := xi + xj + eij
-        self.lin_conv = Linear(self.in_channels + self.out_channels + self.edge_dim, self.out_channels, 
-                                bias = self.bias, weight_initializer='glorot')
-        self.lin_softmax = Linear(self.in_channels + self.out_channels + self.edge_dim, self.out_channels, 
-                                bias = self.bias, weight_initializer='glorot')
+        self.lin_conv = Linear(self.in_channels + self.out_channels + self.edge_dim,
+                               self.out_channels,
+                               bias = self.bias,
+                               weight_initializer='glorot'
+                            )
+        self.lin_softmax = Linear(self.in_channels + self.out_channels + self.edge_dim,
+                                  self.out_channels,
+                                  bias = self.bias,
+                                  weight_initializer='glorot'
+                                )
 
-        self.linear_edge = Linear(self.in_channels + self.out_channels + self.edge_dim, self.out_channels, 
-                                  bias = self.bias, weight_initializer='glorot')
+        self.linear_edge = Linear(self.in_channels + self.out_channels + self.edge_dim, self.out_channels,
+                                  bias = self.bias,
+                                  weight_initializer='glorot'
+                                )
         self.batch_norm = torch.nn.BatchNorm1d(self.out_channels, track_running_stats=self.batch_track_stats) if self.normalize_batch else None
         self.reset_parameters()
 
@@ -91,7 +66,6 @@ class NodeConv(MessagePassing):
         out = self.propagate(edge_index, x=x, edge_attr=edge_attr)
         out = out if self.batch_norm is None else self.batch_norm(out)
         return out + x
-    
     def message(self, x_i: Tensor, x_j: Tensor, edge_attr: OptTensor) -> Tensor:
         z = torch.cat([x_i, x_j, edge_attr], dim=-1) if edge_attr is not None else torch.cat([x_i, x_j], dim=-1)
         #Old version with leaky relu
@@ -99,7 +73,6 @@ class NodeConv(MessagePassing):
         return F.softplus(self.lin_softmax(z)) * F.sigmoid(self.lin_conv(z))
     
 class cgcnn(torch.nn.Module):
-
     def __init__(
         self,
         in_channels: int,
@@ -114,8 +87,7 @@ class cgcnn(torch.nn.Module):
         pre_conv_layers: int = 1,
         post_conv_layers: int = 2,
         batch_track_stats: bool = True,
-    ):
-        
+    ):  
         super().__init__()
 
         self.in_channels = in_channels
@@ -146,11 +118,12 @@ class cgcnn(torch.nn.Module):
         self.node_convs = torch.nn.ModuleList()
         for _ in range(num_layers):
             self.node_convs.append(NodeConv(
-                                            channels = hidden_channels, 
+                                            channels = hidden_channels,
                                             edge_dim=hidden_channels,
-                                            dropout=dropout, 
+                                            dropout=dropout,
                                             batch_track_stats=self.batch_track_stats
-                                )) 
+                                            )
+                                )
         # Output layers
         self.pre_pool_layer = Linear(hidden_channels, hidden_channels)
 
@@ -158,24 +131,8 @@ class cgcnn(torch.nn.Module):
         for _ in range(self.post_conv_layers):
             self.post_conv_hidden.append(Linear(hidden_channels, hidden_channels))
         self.output_layer = Linear(hidden_channels, out_channels)
-        
-    #     self.reset_parameters()
-
-
-    # def reset_parameters(self):
-    #     for pre_conv_node in self.pre_conv_nodes:
-    #         pre_conv_node.reset_parameters()
-    #     for node_conv in self.node_conv:
-    #         node_conv.reset_parameters()
-    #     self.pre_pool_layer.reset_parameters()
-    #     for hidden_layer in self.post_conv_hidden:
-    #         hidden_layer.reset_parameters()
-    #     self.output_layer.reset_parameters()
 
     def forward(self, x: Tensor, edge_index: Tensor, edge_attr: OptTensor, batch: Tensor) -> Tensor:
-        """
-        """
-
         # Setup input features
         for pre_node, pre_edge in zip(self.pre_conv_nodes, self.pre_conv_edges):
             x = getattr(F, self.activation)(pre_node(x))
@@ -194,11 +151,10 @@ class cgcnn(torch.nn.Module):
         # Final layers
         for hidden_layer in self.post_conv_hidden:
             x = getattr(F, self.activation)(hidden_layer(x))
-            #x = F.dropout(x, p=self.dropout, training=self.training)
 
         # Predictor:
         if self.task == 'classification':
-            x = F.log_softmax(self.output_layer(x), dim=self.out_channels)
+            x = F.sigmoid(self.output_layer(x))
         elif self.task == 'regression':
             x = self.output_layer(x)
         else:

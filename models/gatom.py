@@ -1,25 +1,11 @@
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F   
 from torch import Tensor
-
-
-from torch_geometric.nn import GATv2Conv, DiffGroupNorm, LayerNorm
-from torch_geometric.nn.dense.linear import Linear
-                    
-from torch import Tensor
-from torch.nn import GRUCell, Linear
-from .mgu import liGRUCell, MGUCell
 
 import torch_geometric
 from torch_geometric.typing import Tensor, OptTensor
-from torch_geometric.nn import aggr
-
-
-recurrent_cell_classes = {
-    'gru': GRUCell,
-    'ligru': liGRUCell,
-    'mgu' : MGUCell,    
-}
+from torch_geometric.nn import aggr, GATv2Conv, LayerNorm
+from torch_geometric.nn.dense.linear import Linear
 
 
 class GeneralGLU(torch.nn.Module):
@@ -60,7 +46,7 @@ class GeneralGLU(torch.nn.Module):
         with torch.no_grad():
             self.linear.bias[self.output_dim:] = gate_bias
 
-                    
+
 class GATom(torch.nn.Module):
     """
     A Graph Attention Network (GAT) model that integrates both local and global
@@ -148,14 +134,14 @@ class GATom(torch.nn.Module):
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
-        self.edge_dim = edge_dim 
+        self.edge_dim = edge_dim
         self.layers_attention = layers_attention
         self.dropout = dropout
         self.heads = heads
         self.res_connection = residual_connection
         self.task = task
         self.pooling = pooling
-        self.activation = activation 
+        self.activation = activation
         self.activation_cell = activation_cell
         self.pre_conv_layers = pre_conv_layers
         self.post_conv_layers = post_conv_layers
@@ -241,7 +227,6 @@ class GATom(torch.nn.Module):
 
     def forward(self, x: Tensor, edge_index: Tensor, edge_attr: OptTensor,
                 batch: Tensor) -> Tensor:
-        
         #Embedding block
         for pre_node, pre_edge in zip(self.pre_conv_nodes, self.pre_conv_edges):
             x = getattr(F, self.activation)(pre_node(x))

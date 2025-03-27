@@ -1,32 +1,22 @@
-import numpy as np
 import json
-import re
 import os
+from typing import List
 
-from typing import Callable, List, Optional, Union, Dict
-
-from scipy.ndimage import gaussian_filter1d
-
-import networkx as nx
-import matplotlib.pyplot as plt
+import numpy as np
 from tqdm import tqdm
 
-from pymatgen.analysis.local_env import NearNeighbors, VoronoiNN, IsayevNN, CrystalNN
-from pymatgen.analysis.graphs import StructureGraph
+
 from pymatgen.core import Structure
 from pymatgen.core.periodic_table import Element
 
 import torch
-from torch_geometric.data import Data, InMemoryDataset, download_url
-from torch_geometric.utils import to_networkx, add_self_loops
-import torch_geometric.transforms as T
-import torch_geometric.utils
 import torch.nn.functional as F
 
+from torch_geometric.data import Data, InMemoryDataset
+import torch_geometric.utils
 
 import crystal_builder.prepocessor as cb
 
-    
 class GaussianDistance(object):
     """
     Expands the distance by Gaussian basis.
@@ -58,7 +48,7 @@ def get_atomic_name(atomic_number: int):
     return Element.from_Z(atomic_number).symbol
 
 
-def OneHotDegree(data, max_degree, in_degree=False, cat=True):
+def one_hot_degree(data, max_degree, in_degree=False, cat=True):
     idx, x = data.edge_index[1 if in_degree else 0], data.x
     deg = torch_geometric.utils.degree(idx, data.num_nodes, dtype=torch.long)
     deg = F.one_hot(deg, num_classes=max_degree + 1).to(torch.float)
@@ -76,7 +66,7 @@ class MatbenchDataset(InMemoryDataset):
     """
     Matbench dataset class for PyTorch
     """
-    def __init__(self, 
+    def __init__(self,
                 root,
                 dataset_name='mp_gap',
                 transform=None,
@@ -84,9 +74,9 @@ class MatbenchDataset(InMemoryDataset):
                 pre_filter=None,
                 num_samples=None, 
                 force_reload=False,
-                graph_algorithm : str ='KNN', 
+                graph_algorithm : str ='KNN',
                 cell_type : str  = 'UnitCell',
-                ):
+        ):
         
         self._dataset_name = dataset_name
         self.num_samples = num_samples
@@ -116,7 +106,7 @@ class MatbenchDataset(InMemoryDataset):
                 data = json.load(f)
             data_list = []
             total_memory = 0
-            print('Staring processing data {}...'.format(raw_path))
+            print(f'Staring processing data {raw_path}...')
             self.num_samples = self.num_samples if self.num_samples is not None else len(data['data'])
 
             #create the graph builder object
@@ -125,7 +115,7 @@ class MatbenchDataset(InMemoryDataset):
                 print(f'Using graph algorithm {self._graph_algorithm}')
             except:
                 raise ValueError(f'Graph algorithm {self._graph_algorithm} not implemented')
-            
+                       
             # load atomic encoding
             atomic_enconding = load_atom_encoding(
                 os.path.join(self.processed_dir, f'{self._dataset_name}_atom_features.json')
@@ -142,10 +132,10 @@ class MatbenchDataset(InMemoryDataset):
                 # we remove the magnetic orbital moment since it is something we don't use
                 try:
                     graph = g(structure.remove_site_property('magmom'))
-                except: 
+                except:
                     graph = g(structure)
-                
-                ## To do: implement this in a more general way so it accepts any attr string. 
+
+                ## To do: implement this in a more general way so it accepts any attr string.
                 # node features: dim(n_nodes, dim_feature)
                 node_features = np.vstack(
                     [atomic_enconding[get_atomic_name(attr['atomic_number'])] for nodes, attr in graph.nodes(data=True)]
@@ -169,3 +159,4 @@ class MatbenchDataset(InMemoryDataset):
 
             
             torch.save(self.collate(data_list), processed_path)
+            print(f'Finished processing data {raw_path}...')
