@@ -5,61 +5,49 @@ from typing import List
 import numpy as np
 from tqdm import tqdm
 
-
 from pymatgen.core import Structure
-from pymatgen.core.periodic_table import Element
+from pymatgen.symmetry.groups import SpaceGroup
 
 import torch
-import torch.nn.functional as F
+from torch.nn.functional import one_hot
 
 from torch_geometric.data import Data, InMemoryDataset
-import torch_geometric.utils
 
 import crystal_builder.prepocessor as cb
+from utils import *
 
-class GaussianDistance(object):
-    """
-    Expands the distance by Gaussian basis.
-
-    Unit: angstrom
-    """
-    def __init__(self, dmin, dmax, step, var=None):
-        assert dmin < dmax
-        assert dmax - dmin > step
-        self.filter = np.arange(dmin, dmax+step, step)
-        if var is None:
-            var = step
-        self.var = var
-
-    def expand(self, distances):
-        return np.exp(-(distances[..., np.newaxis] - self.filter)**2 /
-                      self.var**2)
 
 def load_atom_encoding(path):
     with open(path, 'r') as f:
         atom_encoding = json.load(f)
     return atom_encoding
+
+def get_symmetry_group_onehot_dict():
+    """
+    Generate a dictionary mapping space group numbers to one-hot encoded vectors.
+    The number of crystallographic space groups is 230 in 3 dimensions.
+    """
+    num_groups = 230
+    group_dict = {}
+    for sg_num in range(1, num_groups + 1):
+        sg = SpaceGroup.from_int_number(sg_num)
+        key = sg.symbol
+        index = torch.tensor(sg_num - 1)
+        one_hot_vector = one_hot(index, num_classes=num_groups)
+        group_dict[key] = one_hot_vector.tolist()
+    return group_dict
+
+# Generate the dictionary
+symmetry_group_dict = get_symmetry_group_onehot_dict()
+
+# For demonstration, print out the key and one-hot vector of a couple of groups.
+for key in list(symmetry_group_dict.keys())[:3]:
+    print(f"{key}: {symmetry_group_dict[key]}")
+
     
 def bytes_to(bytes, to, bsize=1024): 
     a = {'k' : 1, 'm': 2, 'g' : 3, 't' : 4, 'p' : 5, 'e' : 6 }
     return bytes / (bsize ** a[to])
-
-def get_atomic_name(atomic_number: int):
-    return Element.from_Z(atomic_number).symbol
-
-
-def one_hot_degree(data, max_degree, in_degree=False, cat=True):
-    idx, x = data.edge_index[1 if in_degree else 0], data.x
-    deg = torch_geometric.utils.degree(idx, data.num_nodes, dtype=torch.long)
-    deg = F.one_hot(deg, num_classes=max_degree + 1).to(torch.float)
-
-    if x is not None and cat:
-        x = x.view(-1, 1) if x.dim() == 1 else x
-        data.x = torch.cat([x, deg.to(x.dtype)], dim=-1)
-    else:
-        data.x = deg
-
-    return data
 
 
 class MatbenchDataset(InMemoryDataset):
@@ -121,8 +109,8 @@ class MatbenchDataset(InMemoryDataset):
                 os.path.join(self.processed_dir, f'{self._dataset_name}_atom_features.json')
             )
 
-            # set up class for gaussian expansion
-            filter = GaussianDistance(0,8, 0.2)
+            # load symmetry group encoding
+            symmetry_group_encoding = get_symmetry_group_onehot_dict()
             
             for i, entry in enumerate(tqdm(data['data'])):
                 if i >= self.num_samples:
@@ -135,16 +123,13 @@ class MatbenchDataset(InMemoryDataset):
                 except:
                     graph = g(structure)
 
-                ## To do: implement this in a more general way so it accepts any attr string.
-                # node features: dim(n_nodes, dim_feature)
-                node_features = np.vstack(
-                    [atomic_enconding[get_atomic_name(attr['atomic_number'])] for nodes, attr in graph.nodes(data=True)]
-                )
+                # features from original graph
+                node_features, edge_features = construct_graph_features(graph, atomic_enconding)
+                global_features = symmetry_group_encoding[structure.get_space_group_info()[0]]
 
-                # edge features: dim(n_edges, dim_features_edge)
-                edge_features = np.vstack(
-                    [filter.expand(attr['distance']) for node1, node2, attr in graph.edges(data=True)]
-                )
+                # create line graph
+                line_graph = construct_line_graph(graph)
+                #line_node_features, line_edge_features = construct_line_graph_features(line_graph, edge_features)
 
                 data = Data(
                     x = torch.tensor(node_features, dtype=torch.float32),

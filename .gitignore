@@ -1,5 +1,3 @@
-# do not push data files
-data/
 
 # ignore json files for encoding
 encoding/
