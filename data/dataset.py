@@ -11,10 +11,11 @@ from pymatgen.symmetry.groups import SpaceGroup
 import torch
 from torch.nn.functional import one_hot
 
-from torch_geometric.data import Data, InMemoryDataset
+from torch_geometric.data import InMemoryDataset
 
 import crystal_builder.prepocessor as cb
-from utils import *
+
+from .graphs import *
 
 
 def load_atom_encoding(path):
@@ -36,13 +37,6 @@ def get_symmetry_group_onehot_dict():
         one_hot_vector = one_hot(index, num_classes=num_groups)
         group_dict[key] = one_hot_vector.tolist()
     return group_dict
-
-# Generate the dictionary
-symmetry_group_dict = get_symmetry_group_onehot_dict()
-
-# For demonstration, print out the key and one-hot vector of a couple of groups.
-for key in list(symmetry_group_dict.keys())[:3]:
-    print(f"{key}: {symmetry_group_dict[key]}")
 
     
 def bytes_to(bytes, to, bsize=1024): 
@@ -123,23 +117,19 @@ class MatbenchDataset(InMemoryDataset):
                 except:
                     graph = g(structure)
 
-                # features from original graph
-                node_features, edge_features = construct_graph_features(graph, atomic_enconding)
-                global_features = symmetry_group_encoding[structure.get_space_group_info()[0]]
-
-                # create line graph
-                line_graph = construct_line_graph(graph)
-                #line_node_features, line_edge_features = construct_line_graph_features(line_graph, edge_features)
-
-                data = Data(
-                    x = torch.tensor(node_features, dtype=torch.float32),
-                    edge_index = torch.tensor(list(graph.edges()), dtype=torch.long).t().contiguous(),
-                    edge_attr = torch.tensor(edge_features, dtype=torch.float32),
-                    y = torch.tensor([y], dtype=torch.float32)
-                )
+                # Create a data object with both the graphs and its line graph.
+                data = GraphWithLineGraph.from_graph(
+                            graph=graph,
+                            atomic_encoding=atomic_enconding,
+                            global_features=symmetry_group_encoding[structure.get_space_group_info()[0]],
+                            y=y,
+                            max_distance=10,
+                            step=0.1
+                        )
 
                 data_list.append(data)
                 total_memory += data.num_edges * 2 * data.edge_attr.element_size() + data.num_nodes * data.x.element_size()
+                total_memory += data.num_edges * 2 * data.edge_attr_line_graph.element_size() + data.num_nodes * data.x_line_graph.element_size()
                 print(f'Memory used: {bytes_to(total_memory, "m"):.4f} MB')
 
             
