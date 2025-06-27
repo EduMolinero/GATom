@@ -26,10 +26,15 @@ Optimizer Parameters:
     weight_decay: 1.0e-2
 
 Scheduler Parameters:
-  name: "ReduceLROnPlateau"
-  params:
-    mode: "min"
-    factor: 0.8
-    patience: 10
-    threshold: 1.0e-3
-    min_lr: 1.0e-7
+  name: SequentialLR
+  milestones: [10]
+  sub_schedulers:
+      name: LinearLR
+      params: 
+        start_factor: 0.1
+        total_iters: 10
+      name: CosineAnnealingLR
+      params: 
+        T_max: 500 
+        eta_min: 1.0e-6
+

@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 from sklearn.metrics import roc_auc_score
+from ray import tune
 
 
 class Normalizer:
@@ -57,8 +58,9 @@ class EarlyStopper:
 class Trainer:
     __slots__ = [
         'device', 'epochs', 'save_every',
-        'task','loss_function', 'parallel_bool', 
+        'task','loss_function',
         'rank', 'eval_metric',
+        'parallel_bool'
     ]
     def __init__(self, params: dict) -> None:
         for key, value in params.items():
@@ -75,18 +77,20 @@ class Trainer:
         print("-"*50)
 
 
-    def training(self, loader, model, optimizer):
+    def training(self, loader, model, optimizer, scheduler = None):
         total_loss = 0
         norm = 0
         model.train()
         for data in loader:
             data = data.to(self.device, non_blocking=True)
             optimizer.zero_grad()
-            out = model(data.x, data.edge_index, data.edge_attr, data.batch)
+            out = model(data)
             loss = getattr(F,self.loss_function)(out, data.y)
             loss.backward()
             total_loss += loss.item() * out.size(0)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             norm += out.size(0)
 
         total_loss /= norm
@@ -100,8 +104,7 @@ class Trainer:
         with torch.no_grad():
             for data in loader:
                 data = data.to(self.device, non_blocking=True)
-                out = model(data.x, data.edge_index, data.edge_attr, data.batch)
-
+                out = model(data)
                 if self.eval_metric != 'auc':
                     error = getattr(F, self.eval_metric)(out, data.y)
                     total_error += error.item() * out.size(0)
@@ -149,7 +152,7 @@ def train_model(
         normalizer : Normalizer = None,
         early_stopping : bool = True,
         bool_plot : bool = False,
-        distributed : bool = False,
+        hyperparam_optim: bool = False,
         ):
 
     if trainer.rank == 0:
@@ -164,8 +167,10 @@ def train_model(
     loss_epoch = []
     val_epoch = []
     test_epoch = []
+    lrs = []
 
     early_stopper = EarlyStopper(patience=50, min_delta=1e-4) 
+    scheduler_name = scheduler.__class__.__name__
 
     for epoch in range(1, trainer.epochs + 1):
         if epoch == 1 and trainer.rank == 0:
@@ -174,7 +179,10 @@ def train_model(
             sys.stdout.flush()
 
         start_epoch = time.time()
-        loss = trainer.training(train_loader, model, optimizer)
+        if scheduler_name != "OneCycleLR":
+            loss = trainer.training(train_loader, model, optimizer)
+        else: 
+            loss = trainer.training(train_loader, model, optimizer, scheduler)
 
         if trainer.rank == 0:
             val_metric = trainer.evaluation(validation_loader, model)
@@ -213,13 +221,28 @@ def train_model(
                 sys.stdout.flush()
                 break
 
-
-        if distributed:
-            torch.distributed.barrier()
-
         # scheduler
         if scheduler is not None: 
-            scheduler.step(val_metric)
+            lrs.append(scheduler.get_last_lr())
+            if scheduler_name != 'OneCycleLR':
+                if scheduler_name != "ReduceLROnPlateau": 
+                    scheduler.step()
+                else:
+                    scheduler.step(val_metric)
+
+        if hyperparam_optim:
+            # report to Ray the metric and the epoch so the scheduler can kill the trial prematurely.
+            if trainer.task == 'regression':
+                tune.report({
+                    "val_loss": val_metric,
+                    "epoch": epoch
+                })
+            else:                 
+                tune.report({
+                    "accuracy": val_metric,
+                    "epoch": epoch
+                })
+
 
 
     cuda_max_mem = bytes_to(torch.cuda.max_memory_allocated(), 'g')
@@ -277,6 +300,15 @@ def train_model(
                 except:
                     print("Error saving the files")
                     sys.stdout.flush()
+            if scheduler is not None:
+                fig_lr, ax_lr = plt.subplots()
+                ax_lr.plot(t, lrs)
+                ax_lr.set(
+                    xlabel='Epoch', ylabel='Learning rate'
+                )
+                ax_lr.grid()
+                fig_lr.savefig('learning_rate.png')
+                np.savetxt('learning_rate.txt',np.column_stack((t, lrs)))
 
         # Only works for GATOM models
         dict_model = model._dict_model() if not trainer.parallel_bool else model.module._dict_model()

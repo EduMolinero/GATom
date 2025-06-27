@@ -1,0 +1,39 @@
+Model Parameters:
+  batch_size: 128
+  bool_plot: true
+  early_stopping: false
+  graph_algorithm: KNN
+  cell_type: UnitCell
+  internal_params:
+    hidden_channels: 128
+    layers_attention: 4
+    pre_conv_layers: 1
+    post_conv_layers: 3
+    dropout: 0.2
+    heads: 4
+    aggregation: add
+    pooling: global_mean_pool
+    activation: leaky_relu
+    activation_cell: silu
+    line_graph: true
+    task: regression
+    layers_attention_line: 3
+  name: GATom
+Optimizer Parameters:
+  name: AdamW
+  params:
+    lr: 0.0005
+    weight_decay: 1.0e-05
+Scheduler Parameters:
+  milestones:
+  - 10
+  name: SequentialLR
+  sub_schedulers:
+  - name: LinearLR
+    params:
+      start_factor: 0.1
+      total_iters: 10
+  - name: CosineAnnealingLR
+    params:
+      T_max: 990
+      eta_min: 1.0e-07

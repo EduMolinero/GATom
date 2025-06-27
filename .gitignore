@@ -13,9 +13,11 @@ old/
 # ignore vscode settings
 .vscode/
 
-# jupyter notebooks
+# jupyter notebooks 
 *.ipynb
 
+# ignore .txt files
+*.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

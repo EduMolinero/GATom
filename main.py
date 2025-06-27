@@ -17,7 +17,7 @@ from data import MatbenchDataset
 from training import Trainer, train_model, Normalizer
 
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel 
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
 # Global counter for naming
@@ -63,12 +63,16 @@ def init_params(args):
     return model_params, optimizer_params, scheduler_params
 
 
-def load_dataset(rank, path_dataset, len_dataset = 30000, name = 'mp_gap', graph_algorithm = 'KNN', cell_type = 'UnitCell'):
+def load_dataset(rank, path_dataset, len_dataset = 30000, name = 'mp_gap', graph_algorithm = 'KNN', cell_type = 'UnitCell', line_graph_bool = True):
     # Load the dataset
     start = time.time()
     path = osp.join(f'{path_dataset}', name)
-    dataset = MatbenchDataset(path, name, 
-                                graph_algorithm= graph_algorithm, cell_type=cell_type)
+    dataset = MatbenchDataset(path, 
+                              name,
+                              graph_algorithm= graph_algorithm,
+                              cell_type=cell_type,
+                              line_graph_bool=line_graph_bool
+                            )
     
     if rank == 0:
         print("Loading the dataset.....")
@@ -79,8 +83,20 @@ def load_dataset(rank, path_dataset, len_dataset = 30000, name = 'mp_gap', graph
     # Reduce the size of the dataset
     dataset = dataset if len_dataset == 'all' else dataset[:int(len_dataset)]
 
-    return dataset
+    return dataset, len(dataset)
 
+def get_dimensions(data, line_graph_bool):
+    in_channels = data.x.size(-1)
+    edge_dim = data.x_line.size(-1)
+    global_features_dim = data.global_features.size(-1) 
+    out_channels = data.y.size(-1)
+
+    if line_graph_bool:
+        line_edge_dim = data.edge_attr_line.size(-1)
+    else:
+        line_edge_dim = None
+
+    return in_channels, edge_dim, line_edge_dim, global_features_dim, out_channels
 
 def split_datasets(dataset, rank):
     # Ratios: 80% train, 10% validation, 10% test
@@ -110,7 +126,8 @@ def training_loader_ddp(rank, world_size, train_dataset, batch_size, num_workers
                                batch_size = batch_size,
                                sampler=train_sampler,
                                pin_memory=pin_memory,
-                               num_workers=num_workers
+                               num_workers=num_workers,
+                               follow_batch=['x','x_line']
                             )
 
     return train_loader
@@ -120,7 +137,8 @@ def training_loader_no_ddp( train_dataset, batch_size, num_workers = 2, gpu_bool
     train_loader = DataLoader(train_dataset,
                                batch_size = batch_size,
                                pin_memory=pin_memory,
-                               num_workers=num_workers
+                               num_workers=num_workers,
+                               follow_batch=['x','x_line']
                              )
     return train_loader
 
@@ -132,37 +150,57 @@ def val_test_loaders_no_ddp(val_dataset, test_dataset, batch_size, num_workers =
                             batch_size = batch_size,
                             pin_memory=pin_memory,
                             num_workers=num_workers,
-                            shuffle=False
+                            shuffle=False,
+                            follow_batch=['x','x_line']
                             )
     test_loader = DataLoader(test_dataset, 
                              batch_size = batch_size,
                              pin_memory=pin_memory,
                              num_workers=num_workers,
-                             shuffle=False
+                             shuffle=False,
+                             follow_batch=['x','x_line']
                              )
     return val_loader, test_loader
 
-def cleanup():
-    dist.destroy_process_group()
+def build_optimizer(model, optimizer_params):
+    return getattr(torch.optim, optimizer_params["name"])(
+        model.parameters(),
+        **optimizer_params["params"]
+    )
 
-def setup():
-    dist.init_process_group(backend="nccl")
-    if int(os.environ["RANK"]) == 0:
-        print("Distributed DDP initialized")
+def build_scheduler(optimizer, scheduler_params):
+    name = scheduler_params["name"]
+    if name == "None":
+        return None
+    elif name == "SequentialLR":
+        scheds = [build_scheduler(optimizer, s) for s in scheduler_params["sub_schedulers"]]
+        return torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=scheds,
+            milestones=scheduler_params["milestones"]
+        )
+    elif name == "ChainedScheduler":
+        scheds = [build_scheduler(optimizer, s) for s in scheduler_params["sub_schedulers"]]
+        return torch.optim.lr_scheduler.ChainedScheduler(scheds)
+    else:
+        cls  = getattr(torch.optim.lr_scheduler, name)
+        return cls(optimizer, **scheduler_params["params"])
 
 def training_no_ddp(model_params,
                     optimizer_params,
                     scheduler_params,
+                    hyperparam_optim: bool = False,
                     ):
     # Set the device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     gpu_bool = True if device != "cpu" else False
-    dataset = load_dataset(0,
+    dataset, len_dataset = load_dataset(0,
                             model_params["path_dataset"],
                             len_dataset = model_params["len_dataset"],
                             name=model_params["name_dataset"],
                             graph_algorithm=model_params["graph_algorithm"],
-                            cell_type = 'UnitCell'
+                            cell_type = model_params["cell_type"],
+                            line_graph_bool=model_params["internal_params"]["line_graph"]
                             )
     train_dataset, val_dataset, test_dataset = split_datasets(dataset, 0)
     train_loader = training_loader_no_ddp(train_dataset, 
@@ -180,8 +218,8 @@ def training_no_ddp(model_params,
 
     if model_params["internal_params"]["task"] == 'regression':
         # Normalize targets to mean = 0 and std = 1.
-        mean = dataset.data.y.mean(dim=0, keepdim=True)
-        std = dataset.data.y.std(dim=0, keepdim=True)
+        mean = torch.tensor([0.0], dtype = torch.float32) #dataset.data.y.mean(dim=0, keepdim=True)
+        std = torch.tensor([1.0], dtype = torch.float32)  #dataset.data.y.std(dim=0, keepdim=True)
         normalizer = Normalizer(mean, std)
         dataset.data.y = normalizer.normalize(dataset.data.y)
         print(f"Mean value of the targets: {mean.item()}")
@@ -190,9 +228,22 @@ def training_no_ddp(model_params,
     else:   
         normalizer = None
 
-    model_params["internal_params"]["in_channels"] = dataset[0].x.size(-1)
-    model_params["internal_params"]["edge_dim"] = dataset[0].edge_attr.size(-1)
-    model_params["internal_params"]["out_channels"] = dataset[0].y.size(-1)
+    
+    in_channels, edge_dim, line_edge_dim, global_features_dim, out_channels = get_dimensions(
+        dataset[0], model_params["internal_params"]["line_graph"]
+    )
+
+    # Update certain parameters
+    model_params["internal_params"]["in_channels"] = in_channels
+    model_params["internal_params"]["edge_dim"] = edge_dim
+    model_params["internal_params"]["out_channels"] = out_channels
+    model_params["internal_params"]["line_edge_dim"] = line_edge_dim
+    model_params["internal_params"]["global_fea_dim"] = global_features_dim
+
+    # Specific params for OneCycleLR
+    if scheduler_params["name"] == "OneCycleLR":
+        scheduler_params["params"]["epochs"] = model_params["epochs"]
+        scheduler_params["params"]["steps_per_epoch"] = int(np.ceil(len_dataset/model_params["batch_size"]))
 
     loss_function = 'mse_loss' if model_params["internal_params"]["task"] == 'regression' else 'binary_cross_entropy'
     eval_metric = 'l1_loss' if model_params["internal_params"]["task"] == 'regression' else 'auc'
@@ -204,22 +255,17 @@ def training_no_ddp(model_params,
         print(f"Params: {model_params}")
         raise ValueError("Model not implemented!")
 
-    optimizer = getattr(torch.optim, optimizer_params["name"])(
-        model.parameters(),
-        **optimizer_params["params"]
-    )
-    scheduler = getattr(torch.optim.lr_scheduler, scheduler_params["name"])(
-        optimizer, **scheduler_params["params"]
-    )
+    optimizer = build_optimizer(model, optimizer_params)
+    scheduler = build_scheduler(optimizer, scheduler_params)
 
     trainer = Trainer({'device': device, 
                        'epochs': model_params["epochs"], 
                        'save_every' : 100, 
                        'task': model_params["internal_params"]["task"],
                        'loss_function': loss_function, 
-                       'parallel_bool': model_params["parallel_bool"], 
                        'rank': model_params["rank"],
                        'eval_metric': eval_metric,
+                       'parallel_bool': False,
                         })
     
     best_val_error, best_test_error = train_model(model, optimizer,
@@ -231,6 +277,7 @@ def training_no_ddp(model_params,
                                                 normalizer=normalizer,
                                                 early_stopping = model_params["early_stopping"],
                                                 bool_plot = model_params["bool_plot"],
+                                                hyperparam_optim=hyperparam_optim
                                     )
 
     if normalizer is not None:
@@ -241,6 +288,122 @@ def training_no_ddp(model_params,
     else:
         print("Best validation error: ", best_val_error)
         print("Best test error: ", best_test_error)
+
+    return best_val_error, best_test_error
+
+def training_ddp(model_params,
+                    optimizer_params,
+                    scheduler_params,
+                    hyperparam_optim: bool = False,
+                    ):
+    # Set the device
+    rank = model_params["rank"]
+    device = rank
+    world_size = int(os.environ["WORLD_SIZE"])
+    gpu_bool = True # For ddp this will always be true
+    dataset, len_dataset = load_dataset(rank,
+                            model_params["path_dataset"],
+                            len_dataset = model_params["len_dataset"],
+                            name=model_params["name_dataset"],
+                            graph_algorithm=model_params["graph_algorithm"],
+                            cell_type = model_params["cell_type"],
+                            line_graph_bool=model_params["internal_params"]["line_graph"]
+                            )
+    train_dataset, val_dataset, test_dataset = split_datasets(dataset, rank)
+    train_loader = training_loader_ddp(
+        rank, 
+        world_size,
+        train_dataset, 
+        model_params["batch_size"],
+        num_workers = model_params["num_workers"],
+        gpu_bool = gpu_bool
+    )
+
+    val_loader, test_loader = val_test_loaders_no_ddp(val_dataset,
+                                                      test_dataset,
+                                                      model_params["batch_size"],
+                                                      num_workers = model_params["num_workers"],
+                                                      gpu_bool = gpu_bool
+                                                      )
+
+    if model_params["internal_params"]["task"] == 'regression':
+        # Normalize targets to mean = 0 and std = 1.
+        mean = torch.tensor([0.0], dtype = torch.float32) #dataset.data.y.mean(dim=0, keepdim=True)
+        std = torch.tensor([1.0], dtype = torch.float32)  #dataset.data.y.std(dim=0, keepdim=True)
+        normalizer = Normalizer(mean, std)
+        dataset.data.y = normalizer.normalize(dataset.data.y)
+        print(f"Mean value of the targets: {mean.item()}")
+        print(f"Std value of the targets: {std.item()}")
+        sys.stdout.flush()
+    else:   
+        normalizer = None
+
+    
+    in_channels, edge_dim, line_edge_dim, global_features_dim, out_channels = get_dimensions(
+        dataset[0], model_params["internal_params"]["line_graph"]
+    )
+
+    # Update certain parameters
+    model_params["internal_params"]["in_channels"] = in_channels
+    model_params["internal_params"]["edge_dim"] = edge_dim
+    model_params["internal_params"]["out_channels"] = out_channels
+    model_params["internal_params"]["line_edge_dim"] = line_edge_dim
+    model_params["internal_params"]["global_fea_dim"] = global_features_dim
+
+    # Specific params for OneCycleLR
+    if scheduler_params["name"] == "OneCycleLR":
+        scheduler_params["params"]["epochs"] = model_params["epochs"]
+        scheduler_params["params"]["steps_per_epoch"] = int(np.ceil(len_dataset/model_params["batch_size"]))
+
+    loss_function = 'mse_loss' if model_params["internal_params"]["task"] == 'regression' else 'binary_cross_entropy'
+    eval_metric = 'l1_loss' if model_params["internal_params"]["task"] == 'regression' else 'auc'
+    try:
+        # this is done to avoid errors when we have several workers
+        model_class = getattr(models, model_params["name"])
+        model = model_class(**model_params["internal_params"]).to(device)
+        model = DDP(
+            model,
+            device_ids=[device],
+            find_unused_parameters=True,
+        )
+    except AttributeError:
+        print(f"Params: {model_params}")
+        raise ValueError("Model not implemented!")
+
+    optimizer = build_optimizer(model, optimizer_params)
+    scheduler = build_scheduler(optimizer, scheduler_params)
+
+    trainer = Trainer({'device': device, 
+                       'epochs': model_params["epochs"], 
+                       'save_every' : 100, 
+                       'task': model_params["internal_params"]["task"],
+                       'loss_function': loss_function, 
+                       'rank': model_params["rank"],
+                       'eval_metric': eval_metric,
+                       'parallel_bool': True,
+                        })
+    
+    best_val_error, best_test_error = train_model(model, optimizer,
+                                                train_loader,
+                                                val_loader,
+                                                test_loader,
+                                                trainer,
+                                                scheduler=scheduler,
+                                                normalizer=normalizer,
+                                                early_stopping = model_params["early_stopping"],
+                                                bool_plot = model_params["bool_plot"],
+                                                hyperparam_optim=hyperparam_optim
+                                    )
+
+    if rank == 0:
+        if normalizer is not None:
+            print(f"{'Best validation error:':25} {normalizer.std.item() * best_val_error:>15.6f} [Physical units] \t||\t {best_val_error:>15.6f} [std. units]")
+            print(f"{'Best test error:':25} {normalizer.std.item() * best_test_error:>15.6f} [Physical units] \t||\t {best_test_error:>15.6f} [std. units]")
+            best_test_error = normalizer.std.item() * best_test_error
+            best_val_error = normalizer.std.item() * best_val_error
+        else:
+            print("Best validation error: ", best_val_error)
+            print("Best test error: ", best_test_error)
 
     return best_val_error, best_test_error
 
@@ -275,16 +438,13 @@ def objective(
         "weight_decay": config["weight_decay"]
     })
 
+    # the report to the tune object is inside this function
     best_val_error, best_test_error = training_no_ddp(
         updated_model_params, 
         optimizer_params,
         scheduler_params,
+        hyperparam_optim = True,
     )
-
-    # Report to Ray the metric(s) you want to optimize
-    tune.report({
-        "loss": best_val_error,
-    })
 
 def hyperparam_optim(args):
     width = 58  # Width inside the borders
@@ -307,6 +467,7 @@ def hyperparam_optim(args):
     )
     sys.stdout.flush()
 
+    import ray
     from ray import tune
     from ray.tune import Tuner, TuneConfig, RunConfig
     from ray.tune.schedulers import ASHAScheduler
@@ -316,31 +477,29 @@ def hyperparam_optim(args):
     # Initialize parameters
     model_params, optimizer_params, scheduler_params = init_params(args)
     model_params["bool_plot"] = False
-    model_params["parallel_bool"] = False
     model_params["rank"] = 0
 
     # Define the search space
     search_space = {}
 
-    max_layers = 25 if model_params["internal_params"]["residual_connection"] else 5
-    step_layers = 5 if model_params["internal_params"]["residual_connection"] else 1
-    min_layers = 5 if model_params["internal_params"]["residual_connection"] else 1
-    layers = [x for x in range(min_layers, max_layers + 1, step_layers)] # 5, 10,... 30 or 1, 2,... 5
-    dim = [x * 25 for x in range(1, 9)] # 25, 50,... 200
-    batch_sizes = [64, 128, 256]
-    lrs = [1e-6, 5e-6, 1e-5, 5e-5, 1e-4]
-    weight_decays = [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2]
+    layers = [x for x in range(1,6)] # 1, 2, ..., 5
+    layers_line = [x for x in range(1,5)] # 1, 2, ..., 4
+    dim = [64, 128, 256] 
+    batch_sizes = [16, 32, 64, 128]
+    lrs = [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3]
+    weight_decays = [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1]
 
     search_space["GATom"] = {
             # Model hyperparams
             "hidden_channels": tune.choice(dim),
             "layers_attention": tune.choice(layers),
-            "pre_conv_layers": 1, 
-            "post_conv_layers": 3,   
-            "dropout": tune.uniform(0.0, 0.9),
-            "heads": tune.choice([1, 2, 3, 4]),
-            "aggregation": tune.choice(["mean", "add", "max", "softmax"]),
-            "pooling": tune.choice(["global_mean_pool", "global_add_pool", "global_max_pool"]),
+            "layers_attention_line": tune.choice(layers_line) if model_params["internal_params"]["line_graph"] else [None],
+            "pre_conv_layers": tune.choice([1,2,3,4]), 
+            "post_conv_layers": tune.choice([1,2,3,4]),   
+            "dropout": tune.quniform(0.0, 0.9, 0.1),
+            "heads": 4, #tune.choice([1, 2, 4, 8]),
+            "aggregation": "add", #tune.choice(["mean", "add", "max", "softmax"]),
+            "pooling": "global_mean_pool", #tune.choice(["global_mean_pool", "global_add_pool", "global_max_pool"]),
             "activation": tune.choice(["relu", "leaky_relu", "sigmoid", "silu"]), 
             "activation_cell": tune.choice(["relu", "gelu", "silu", "sigmoid"]), # ReGLU, GeGLU, SiGLU, and GLU (with sigmoid)    
             # Graph & batch size
@@ -351,28 +510,6 @@ def hyperparam_optim(args):
             "lr": tune.choice(lrs),
             "weight_decay": tune.choice(weight_decays),
     }
-
-    search_space["IMcgcnn"] = {
-            # Model hyperparams
-            "hidden_channels": tune.choice(dim),
-            "layers_attention": tune.choice(layers),
-            "num_timesteps": tune.choice([1, 2, 3, 4]),
-            "pre_conv_layers": tune.choice([1, 2, 3]),
-            "post_conv_layers": tune.choice([1, 2, 3]),
-            "dropout": tune.uniform(0.0, 0.9),
-            "pooling": tune.choice(["global_mean_pool", "global_add_pool", "global_max_pool"]),
-            "activation": tune.choice(["relu", "leaky_relu", "sigmoid"]),
-
-            # Graph & batch size
-            "graph_algorithm": tune.choice(["KNN", "Voronoi"]),
-            "batch_size": tune.choice([8, 16, 32, 64, 128]),
-
-            # Optimizer hyperparams
-            "lr": tune.loguniform(1e-5, 5e-2),
-            "weight_decay": tune.loguniform(1e-5, 1e-1),
-    }
-
-
 
     # Check resources
     if torch.cuda.is_available():
@@ -404,7 +541,7 @@ def hyperparam_optim(args):
 
 
     mode = "min" if model_params["internal_params"]["task"] == "regression" else "max" # minimize error or maximize accuracy
-    metric = "loss" if model_params["internal_params"]["task"] == "regression" else "accuracy" # error or accuracy
+    metric = "val_loss" if model_params["internal_params"]["task"] == "regression" else "accuracy" # error or accuracy
     # set up variables from ray tune
     search_algorithm = HyperOptSearch(
         metric=metric,
@@ -416,10 +553,12 @@ def hyperparam_optim(args):
         search_algorithm = ConcurrencyLimiter(search_algorithm, max_concurrent=torch.cuda.device_count())
 
     scheduler = ASHAScheduler(
+        time_attr="epoch",
         metric=metric,
         mode=mode,
         max_t=model_params["epochs"],
-        reduction_factor=2
+        grace_period=20,
+        reduction_factor=4,
     )
 
     trainable = tune.with_resources(
@@ -442,6 +581,7 @@ def hyperparam_optim(args):
             search_alg=search_algorithm,
             scheduler=scheduler,
             trial_name_creator=trial_count_number,
+            reuse_actors=True,
         ),
         run_config=RunConfig(
             name="hyperparam_optimization",
@@ -468,9 +608,14 @@ def hyperparam_optim(args):
     df_sorted = df.sort_values(by=metric, ascending=True)
     print(df_sorted.to_string())
 
+def cleanup():
+    dist.destroy_process_group()
 
+def ddp_setup():
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    dist.init_process_group(backend="nccl")
 
-def single_calculation_no_ddp(args):
+def single_calculation(args):
     width = 58  # Width inside the borders
     print(
         "=" * 62 + "\n"
@@ -494,20 +639,24 @@ def single_calculation_no_ddp(args):
     model_params, optimizer_params, scheduler_params = init_params(args)
 
     # set bool_plot to True
-    model_params["bool_plot"] = True
-    # set parallel_bool to False and rank to 0
-    model_params["parallel_bool"] = False
-    model_params["rank"] = 0
-
-    best_val_error, best_test_error = training_no_ddp(model_params, optimizer_params, scheduler_params)
+    if args.ddp:
+        ddp_setup()
+        model_params["bool_plot"] = True
+        model_params["rank"] = int(os.environ["LOCAL_RANK"])
+        best_val_error, best_test_error = training_ddp(model_params, optimizer_params, scheduler_params)
+        cleanup()
+    else:
+        model_params["bool_plot"] = True
+        # set parallel_bool to False and rank to 0
+        model_params["rank"] = 0
+        best_val_error, best_test_error = training_no_ddp(model_params, optimizer_params, scheduler_params)
 
     return None
 
 
 
+
 if __name__ == '__main__':
-
-
     # Set the all the parallel info
     parser = argparse.ArgumentParser(
         description="GATom: a Graph Attention neTwOrk for inference of Materials properties"
@@ -608,7 +757,6 @@ if __name__ == '__main__':
         torch.set_float32_matmul_precision('high')
         print("Using fp32!")
 
-
     if args.fix_seed:
         set_seed(42)    
         # Optional flags for reproducibility (may slow down training):
@@ -616,9 +764,8 @@ if __name__ == '__main__':
         # torch.backends.cudnn.benchmark = False
         print("Seed fixed to 42! This is done for reproducibility. Set to false in production.")
 
-
     if args.calculation_type == 'single_calc':
-        single_calculation_no_ddp(args)
+        single_calculation(args)
     elif args.calculation_type == 'hyperparam_optim':
         hyperparam_optim(args)
     else:

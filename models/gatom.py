@@ -4,9 +4,10 @@ from torch import Tensor
 
 import torch_geometric
 from torch_geometric.typing import Tensor, OptTensor
-from torch_geometric.nn import aggr, GATv2Conv, LayerNorm
+from torch_geometric.nn import aggr, GATv2Conv, LayerNorm, TransformerConv, DiffGroupNorm
 from torch_geometric.nn.dense.linear import Linear
 
+from data.graphs import GraphWithLineGraph
 
 class GeneralGLU(torch.nn.Module):
     """
@@ -46,6 +47,194 @@ class GeneralGLU(torch.nn.Module):
         with torch.no_grad():
             self.linear.bias[self.output_dim:] = gate_bias
 
+class LocalAttentionBlock(torch.nn.Module):
+    """
+    Local Attention Block that applies a GATv2 -> GLU - > LayerNorm -> Residual connection.
+    It is valid whether to process the original graph or a line graph.
+    Args:
+        node_dim (int): 
+            Dimensionality of the node embeddings.
+        edge_dim (int): 
+            Number of input features per edge.
+        aggregation (str): 
+            Aggregation strategy for GATv2Conv (e.g., "add", "softmax", "powermean"). 
+        activation (str): 
+            Activation function for GLU. 
+        heads (int): 
+            Number of attention heads for local attention. 
+        dropout (float): 
+            Dropout probability for attention layers. 
+        concat (bool): 
+            Whether to concatenate the x and the output of the GATv2Conv layer. If False it only uses the results of the GATv2Conv layer.
+    """
+    def __init__(
+            self, 
+            node_dim, 
+            edge_dim, 
+            aggregation='add', 
+            activation = 'relu', 
+            heads=4, 
+            dropout=0.0, 
+        ):
+        super().__init__()
+        self.activation = activation
+        self.dropout = dropout
+        # GATv2Conv layer
+        self.norm = LayerNorm(node_dim)
+        self.att_conv = GATv2Conv(
+            node_dim, 
+            node_dim, 
+            heads=heads, 
+            dropout=dropout,
+            add_self_loops=True,
+            negative_slope=0.01,
+            edge_dim=edge_dim,
+            aggr=aggregation
+        )
+        self.gate = GeneralGLU(node_dim * (heads + 1), node_dim, activation=activation)
+
+        # # GATv2Conv layer
+        # self.norm_att = LayerNorm(node_dim)
+        # self.att_conv = GATv2Conv(
+        #     node_dim, 
+        #     node_dim, 
+        #     heads=heads, 
+        #     dropout=dropout,
+        #     add_self_loops=True,
+        #     negative_slope=0.01,
+        #     edge_dim=edge_dim,
+        #     aggr=aggregation
+        # )
+        # # The output of the GATv2Conv has dimensions (N, out_channels * heads)
+        # # We mix the heads together
+        # self.linear_heads = Linear(node_dim * heads, node_dim, bias=False)
+
+        # # GLU and FFN layer
+        # self.norm_ffn = LayerNorm(node_dim)
+        # self.gate = GeneralGLU(node_dim, node_dim, activation=activation)
+        # self.ffn = Linear(node_dim, node_dim, bias=False)
+        # # FFN Normalization layer
+
+    def forward(self, x, edge_index, edge_attr):
+        # # Apply Norm & GATv2Conv
+        # g = self.att_conv(self.norm_att(x), edge_index, edge_attr)
+        # # Residual connection
+        # x = x + self.linear_heads(g)
+
+        # # Apply Norm & GLU and FFN
+        # X = self.gate(self.norm_ffn(x))
+        # # FFN & Residual connection
+        # x = x + self.ffn(X)
+        ## Res+ strategy
+        # Norm 
+        x = self.norm(x)
+        # Activation
+        x = getattr(F, self.activation)(x)
+        # Dropout
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        # GATv2Conv & Gate
+        g = self.att_conv(x, edge_index, edge_attr)
+        X = self.gate(torch.cat([x, g], dim=-1))
+        # Residual Connection
+        x = x + X
+        return x    
+
+class LocalAttentionLayer(torch.nn.Module):
+    """
+    This class implementes the Local Attention Block as a stack of two LocalAttentionBlocks.
+    The first block deals with the line graph and the second block deals with the original graph.
+    """
+    def __init__(
+            self, 
+            node_dim, 
+            edge_dim,
+            line_edge_dim,
+            aggregation='add', 
+            activation = 'silu',
+            heads=4,
+            dropout=0.0,
+        ):
+        super().__init__()
+
+        # Process the line graph
+        # Edge_dim is equal to the node_dim of the line graph
+        self.line_graph_block = LocalAttentionBlock(
+            edge_dim,
+            line_edge_dim,
+            aggregation=aggregation,
+            activation=activation,
+            heads=heads,
+            dropout=dropout,
+        )
+        # Process the original graph
+        self.graph_block = LocalAttentionBlock(
+            node_dim,
+            edge_dim,
+            aggregation=aggregation,
+            activation=activation,
+            heads=heads,
+            dropout=dropout,
+        )
+
+    def forward(
+            self,
+            x: Tensor,
+            edge_index: Tensor,
+            x_line: Tensor,
+            edge_index_line: Tensor,
+            edge_attr_line: Tensor,
+        ):
+
+        # Apply the first block to the line graph
+        x_line = self.line_graph_block(x_line, edge_index_line, edge_attr_line)
+        # Apply the second block to the original graph
+        # x_line == edge_attr
+        x = self.graph_block(x, edge_index, x_line)
+        return x, x_line
+
+
+class GlobalPooling(torch.nn.Module):
+    """
+    Global pooling of the node features into a vector.
+    It combines the pooling with the global features of each graph.
+    """
+    def __init__(
+            self, 
+            node_dim, 
+            global_fea_dim,
+            pooling='global_mean_pool',
+            activation='silu',
+            concat=True,
+        ):
+        super().__init__()
+        self.pooling = pooling
+        self.activation = activation
+        self.global_fea_dim = global_fea_dim
+        self.concat = concat
+        self.dim_gate = 3 * node_dim if concat else node_dim
+
+        # We match the global feature dimension to the node dimension
+        self.global_lin = Linear(global_fea_dim, node_dim, bias=False)
+        # final layer 
+        self.global_gate = GeneralGLU(self.dim_gate, node_dim, activation=activation)
+
+
+    def forward(self, x: torch.Tensor, x_line: torch.Tensor, batch: torch.Tensor, batch_line: torch.Tensor, g_feat: torch.Tensor): 
+
+        # Pool node features
+        pooled = getattr(torch_geometric.nn, self.pooling)(x, batch)
+        # Pool line graph features
+        pooled_line = getattr(torch_geometric.nn, self.pooling)(x_line, batch_line)
+        #reshape the tensor into [batch_size, global_fea_dim]
+        g_feat = g_feat.view(-1, self.global_fea_dim)
+        g_emb  = self.global_lin(g_feat) 
+
+        # Combine everything together
+        super_x = torch.cat((pooled, pooled_line, g_emb), dim=-1) if self.concat else pooled + g_emb + pooled_line 
+        super_x = self.global_gate(super_x)
+
+        return super_x
+
 
 class GATom(torch.nn.Module):
     """
@@ -74,8 +263,6 @@ class GATom(torch.nn.Module):
             Top-level activation for hidden layers (e.g., "silu", "relu"). Defaults to "silu".
         heads (int, optional): 
             Number of attention heads for local attention. Defaults to 1.
-        residual_connection (bool, optional): 
-            Whether to add skip connections between layers. Defaults to False.
         task (str, optional): 
             Model task type: "classification" or "regression". Defaults to "regression".
         dropout (float, optional): 
@@ -84,28 +271,6 @@ class GATom(torch.nn.Module):
             Number of linear layers to transform node/edge features before GAT. Defaults to 1.
         post_conv_layers (int, optional): 
             Number of linear layers to transform the final node embedding before prediction. Defaults to 2.
-
-    Attributes:
-        pre_conv_nodes (torch.nn.ModuleList): 
-            Linear layers for node feature transformation prior to GAT.
-        pre_conv_edges (torch.nn.ModuleList): 
-            Linear layers for edge feature transformation prior to GAT.
-        embedding_att_convs (torch.nn.ModuleList): 
-            List of GATv2Conv layers for local attention.
-        embedding_gate (torch.nn.ModuleList): 
-            Gate layers (GRUCell or GLU) applied after local attention.
-        embedding_norms (torch.nn.ModuleList): 
-            Normalization layers (e.g., LayerNorm or DiffGroupNorm) for each local attention layer.
-        global_conv (GATv2Conv): 
-            Single-head GAT layer for global attention via a super-node approach.
-        global_gate (torch.nn.Module): 
-            Gate for global attention (GRUCell or GLU).
-        global_norm (torch.nn.Module): 
-            Normalization layer applied after global attention pooling.
-        post_conv_hidden (torch.nn.ModuleList): 
-            Linear layers after attention layers for further transformation.
-        output_layer (torch.nn.Linear): 
-            Final linear layer to generate classification or regression outputs.
 
     Returns:
         torch.Tensor: Model output of shape (batch_size, out_channels), or a flattened shape (batch_size,) for a single output dimension.
@@ -116,18 +281,20 @@ class GATom(torch.nn.Module):
         hidden_channels: int,
         out_channels: int,
         edge_dim: int,
+        line_edge_dim: int,
+        global_fea_dim: int,
         pre_conv_layers: int = 1,
-        layers_attention: int = 4,
+        layers_attention: int = 5,
+        layers_attention_line: int = 2,
         post_conv_layers: int = 2,
         activation_cell: str = 'elu',
         pooling: str = 'global_add_pool',
         aggregation: str = 'add',
         activation: str = 'silu',
         heads: int = 1,
-        residual_connection: bool = False,
         task: str = 'regression',
         dropout: float = 0.0,
-
+        line_graph: bool = True,
     ):
         super().__init__()
 
@@ -135,16 +302,19 @@ class GATom(torch.nn.Module):
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
         self.edge_dim = edge_dim
+        self.line_edge_dim = line_edge_dim
+        self.global_fea_dim = global_fea_dim
         self.layers_attention = layers_attention
+        self.layers_attention_line = layers_attention_line
         self.dropout = dropout
         self.heads = heads
-        self.res_connection = residual_connection
         self.task = task
         self.pooling = pooling
         self.activation = activation
         self.activation_cell = activation_cell
         self.pre_conv_layers = pre_conv_layers
         self.post_conv_layers = post_conv_layers
+        self.line_graph = line_graph
 
 
         # check for aggregation with learnable parameters
@@ -160,44 +330,62 @@ class GATom(torch.nn.Module):
         # Embedding block
         self.pre_conv_nodes = torch.nn.ModuleList()
         self.pre_conv_edges = torch.nn.ModuleList()
+        self.pre_conv_edges_line = torch.nn.ModuleList()
         for i in range(self.pre_conv_layers):
             if i == 0:
                 self.pre_conv_nodes.append(Linear(in_channels, hidden_channels))
                 self.pre_conv_edges.append(Linear(edge_dim, hidden_channels))
+                if self.line_graph:
+                    self.pre_conv_edges_line.append(Linear(line_edge_dim, hidden_channels))
             else:
                 self.pre_conv_nodes.append(Linear(hidden_channels, hidden_channels))
                 self.pre_conv_edges.append(Linear(hidden_channels, hidden_channels))
+                if self.line_graph:
+                    self.pre_conv_edges_line.append(Linear(hidden_channels, hidden_channels))
 
         #################################################################
         # Local attention
-        self.embedding_att_convs = torch.nn.ModuleList()
-        self.embedding_gate = torch.nn.ModuleList()
-        self.embedding_norms = torch.nn.ModuleList()
-        for _ in range(self.layers_attention - 1):
+        self.local_attention_line = torch.nn.ModuleList()
+        self.local_attention = torch.nn.ModuleList()
+        if self.line_graph:
+            for _ in range(self.layers_attention_line - 1):
+                self.local_attention_line.append(LocalAttentionBlock(
+                    node_dim=hidden_channels,
+                    edge_dim=hidden_channels,
+                    aggregation=self.aggregation,
+                    activation=self.activation_cell,
+                    heads=self.heads,
+                    dropout=self.dropout,
+                ))
+            for _ in range(self.layers_attention - 1):
+                self.local_attention.append(LocalAttentionBlock(
+                    node_dim=hidden_channels,
+                    edge_dim=hidden_channels,
+                    aggregation=self.aggregation,
+                    activation=self.activation_cell,
+                    heads=self.heads,
+                    dropout=self.dropout,
+                ))
 
-            #norm layer  
-            #self.embedding_norms.append(DiffGroupNorm(hidden_channels, groups=10))
-            self.embedding_norms.append(LayerNorm(hidden_channels))
+        else:
+            for _ in range(self.layers_attention - 1):
+                self.local_attention.append(LocalAttentionBlock(
+                    node_dim=hidden_channels,
+                    edge_dim=hidden_channels,
+                    aggregation=self.aggregation,
+                    activation=self.activation_cell,
+                    heads=self.heads,
+                    dropout=self.dropout,
+                ))
 
-            self.embedding_att_convs.append(GATv2Conv(hidden_channels, hidden_channels, heads = self.heads, dropout=dropout,
-                                            add_self_loops=False, negative_slope=0.01, edge_dim=hidden_channels,
-                                            aggr = self.aggregation))
-            # The output of the GATv2Conv has dimensions (N, out_channels * heads)
-            # the input dimension will be dim(x) + dim(h) = hidden_channels +  hidden_channels * heads = hidden_channels * (heads + 1)
-            self.embedding_gate.append(GeneralGLU(hidden_channels * (self.heads + 1), hidden_channels, activation = self.activation_cell))
-            
-            
         #################################################################
         # Global attention
-        # In order to have a global attention we need to add a super node to the graph
-        # We add a super node to the graph with only one head of attention
-        # otherwise we this leads to problems with the global pooling
-        self.global_conv = GATv2Conv(hidden_channels, hidden_channels, heads = 1, dropout=dropout,
-                                    add_self_loops=False, negative_slope=0.01, edge_dim=hidden_channels,
-                                    aggr = self.aggregation)
-        self.global_gate = GeneralGLU(2 * hidden_channels, hidden_channels, activation = self.activation_cell)
-        #self.global_norm = DiffGroupNorm(hidden_channels, groups=10)
-        self.global_norm = LayerNorm(hidden_channels)
+        self.global_pooling = GlobalPooling(
+            node_dim=hidden_channels,
+            global_fea_dim=global_fea_dim,
+            pooling=self.pooling,
+            activation=self.activation,
+        )
 
         #################################################################
         # Readout block
@@ -207,76 +395,69 @@ class GATom(torch.nn.Module):
 
         self.output_layer = Linear(hidden_channels, out_channels)
 
-        self.reset_parameters()
+    def forward(self, data: GraphWithLineGraph) -> Tensor:
+        # split different features
+        x, edge_index, batch  = data.x, data.edge_index, data.batch
+        global_features = data.global_features
 
-    def reset_parameters(self):
-        r"""Resets all learnable parameters of the module."""
+        if self.line_graph:
+            x_line, edge_index_line, edge_attr_line, batch_line = data.x_line, data.edge_index_line, data.edge_attr_line, data.x_line_batch
+        else:
+            x_line, batch_line = data.x_line, data.x_line_batch
 
-        for pre_conv_node, pre_conv_edge in zip(self.pre_conv_nodes, self.pre_conv_edges):
-            pre_conv_node.reset_parameters()
-            pre_conv_edge.reset_parameters()
-
-        for att_conv, gate, norm in zip(self.embedding_att_convs, self.embedding_gate, self.embedding_norms):
-            att_conv.reset_parameters()
-            gate.reset_parameters()
-            norm.reset_parameters()
-
-        for hidden_layer in self.post_conv_hidden:
-            hidden_layer.reset_parameters()
-        self.output_layer.reset_parameters()
-
-    def forward(self, x: Tensor, edge_index: Tensor, edge_attr: OptTensor,
-                batch: Tensor) -> Tensor:
         #Embedding block
-        for pre_node, pre_edge in zip(self.pre_conv_nodes, self.pre_conv_edges):
-            x = getattr(F, self.activation)(pre_node(x))
-            edge_attr = getattr(F, self.activation)(pre_edge(edge_attr))
+        if self.line_graph:
+            for pre_node, pre_edge, pred_edge_line in zip(self.pre_conv_nodes, self.pre_conv_edges, self.pre_conv_edges_line):
+                x = getattr(F, self.activation)(pre_node(x))
+                x_line = getattr(F, self.activation)(pre_edge(x_line))
+                edge_attr_line = getattr(F, self.activation)(pred_edge_line(edge_attr_line))
+        else:
+            for pre_node, pre_edge in zip(self.pre_conv_nodes, self.pre_conv_edges):
+                x = getattr(F, self.activation)(pre_node(x))
+                x_line = getattr(F, self.activation)(pre_edge(x_line))
 
-        # attention mechanism
         # Local attention
-        for index_layer, (att_conv, gate, norm) in enumerate(zip(self.embedding_att_convs, self.embedding_gate, self.embedding_norms)):
-            # we follow the skip connection (Res+) strategy
-            # Normalization -> Activation -> Dropout -> Conv -> Res
-            # Conv :  GAT + GLU -> g_l := Conv(x_l)
-            # Res+ : x_l = g_{l-1} + x_{l-1}
-            if self.res_connection:
-                x = norm(x)
-                x = getattr(F, self.activation)(x)
-                x = F.dropout(x, p=self.dropout, training=self.training)
-                g = att_conv(x, edge_index, edge_attr)
-                X = gate(torch.cat([x, g], dim=-1))
-                x = x + X
-            else:
-                x = norm(x)
-                g = att_conv(x, edge_index, edge_attr)
-                x = gate(torch.cat([x, g], dim=-1))
+        if self.line_graph:
+            for local_attention_layer in self.local_attention_line:
+                # x, x_line = local_attention_layer(
+                #     x, edge_index, x_line, edge_index_line, edge_attr_line
+                # )
+                x_line = local_attention_layer(x_line,edge_index_line, edge_attr_line)
+            for local_attention_layer in self.local_attention:
+                # x, x_line = local_attention_layer(
+                #     x, edge_index, x_line, edge_index_line, edge_attr_line
+                # )
+                x = local_attention_layer(x, edge_index, x_line)
+            
+                # apply dropout
+                #x = F.dropout(x, p=self.dropout, training=self.training)
+                #x_line = F.dropout(x_line, p=self.dropout, training=self.training)
+        else:
+            for local_attention_layer in self.local_attention:
+                x = local_attention_layer(x, edge_index, x_line)
+                # apply dropout
+                #x = F.dropout(x, p=self.dropout, training=self.training)
 
-        # Global attention
-        row = torch.arange(batch.size(0), device=batch.device)
-        edge_index = torch.stack([row, batch], dim=0)
-
-        out = getattr(torch_geometric.nn, self.pooling)(x, batch).relu()
-        g = self.global_conv((x, out), edge_index)
-        out = self.global_gate(torch.cat([out, g], dim=-1))
-        x = self.global_norm(out)
+        # Global attention: out is the supernode
+        out = self.global_pooling(x, x_line, batch, batch_line, global_features)
+        out = F.dropout(out, p=self.dropout, training=self.training)
 
         # Readout block
         for hidden_layer in self.post_conv_hidden:
-            x = getattr(F, self.activation)(hidden_layer(x))
-        
+            out = getattr(F, self.activation)(hidden_layer(out))
+
         # Predictor:
         if self.task == 'classification':
-            x = F.sigmoid(self.output_layer(x))
+            out = F.sigmoid(self.output_layer(out))
         elif self.task == 'regression':
-            x = self.output_layer(x)
+            out = self.output_layer(out)
         else:
             raise ValueError('Task not recognized.')
     
-        if x.shape[1] == 1:
-            return x.view(-1)
+        if out.shape[1] == 1:
+            return out.view(-1)
         else:
-            return x
-
+            return out
 
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}('
@@ -284,17 +465,20 @@ class GATom(torch.nn.Module):
                 f'hidden_channels={self.hidden_channels}, '
                 f'out_channels={self.out_channels}, '
                 f'edge_dim={self.edge_dim}, '
+                f'line_edge_dim={self.line_edge_dim}, '
+                f'global_fea_dim={self.global_fea_dim}, '
                 f'layers_attention={self.layers_attention},'
+                f'layers_attention_line={self.layers_attention_line if self.line_graph else None},'
                 f'pre_conv_layers={self.pre_conv_layers},'
                 f'post_conv_layers={self.post_conv_layers},'
                 f'aggregation={self.aggregation},'
                 f'heads={self.heads},'
-                f'residual_connection={self.res_connection},'
                 f'dropout={self.dropout:.2f},'
                 f'task={self.task},'
                 f'pooling={self.pooling},'
                 f'activation={self.activation},'
                 f'activation_cell={self.activation_cell}'
+                f'line_graph={self.line_graph}'
                 f')')
     
     def __str__(self) -> str:
@@ -305,21 +489,22 @@ class GATom(torch.nn.Module):
             f"    hidden_channels      = {self.hidden_channels},\n"
             f"    out_channels         = {self.out_channels},\n"
             f"    edge_dim             = {self.edge_dim},\n"
+            f"    line_edge_dim        = {self.line_edge_dim},\n"
+            f"    global_fea_dim       = {self.global_fea_dim},\n"
             f"    pre_conv_layers      = {self.pre_conv_layers},\n"
             f"    layers_attention     = {self.layers_attention},\n"
+            f"    layers_att_line      = {self.layers_attention_line if self.line_graph else None},\n"
             f"    post_conv_layers     = {self.post_conv_layers},\n"
             f"    aggregation          = {self.aggregation},\n"
             f"    heads                = {self.heads},\n"
-            f"    residual_connection  = {self.res_connection},\n"
             f"    dropout              = {self.dropout:.2f},\n"
             f"    task                 = {self.task},\n"
             f"    pooling              = {self.pooling},\n"
             f"    activation           = {self.activation},\n"
             f"    gate                 = {f"GLU with {self.activation_cell}"}\n"
+            f"    line_graph           = {self.line_graph}\n"
             f")"
         )
-
-
     
     def _dict_model(self) -> dict:
         """
@@ -330,15 +515,17 @@ class GATom(torch.nn.Module):
             "hidden_channels" : self.hidden_channels,
             "out_channels" : self.out_channels,
             "edge_dim" : self.edge_dim,
+            "line_edge_dim" : self.line_edge_dim,
+            "global_fea_dim" : self.global_fea_dim,
             "layers_attention" : self.layers_attention,
             "pre_conv_layers" : self.pre_conv_layers,
             "post_conv_layers" : self.post_conv_layers,
             "aggregation" : self.aggregation,
             "heads" : self.heads,
-            "res_connection" : self.res_connection,
             "dropout" : self.dropout,
             "task" : self.task,
             "pooling" : self.pooling,
             "activation" : self.activation,
-            "activation_cell" : self.activation_cell
+            "activation_cell" : self.activation_cell,
+            "line_graph": self.line_graph
         }
