@@ -93,38 +93,7 @@ class LocalAttentionBlock(torch.nn.Module):
         )
         self.gate = GeneralGLU(node_dim * (heads + 1), node_dim, activation=activation)
 
-        # # GATv2Conv layer
-        # self.norm_att = LayerNorm(node_dim)
-        # self.att_conv = GATv2Conv(
-        #     node_dim, 
-        #     node_dim, 
-        #     heads=heads, 
-        #     dropout=dropout,
-        #     add_self_loops=True,
-        #     negative_slope=0.01,
-        #     edge_dim=edge_dim,
-        #     aggr=aggregation
-        # )
-        # # The output of the GATv2Conv has dimensions (N, out_channels * heads)
-        # # We mix the heads together
-        # self.linear_heads = Linear(node_dim * heads, node_dim, bias=False)
-
-        # # GLU and FFN layer
-        # self.norm_ffn = LayerNorm(node_dim)
-        # self.gate = GeneralGLU(node_dim, node_dim, activation=activation)
-        # self.ffn = Linear(node_dim, node_dim, bias=False)
-        # # FFN Normalization layer
-
     def forward(self, x, edge_index, edge_attr):
-        # # Apply Norm & GATv2Conv
-        # g = self.att_conv(self.norm_att(x), edge_index, edge_attr)
-        # # Residual connection
-        # x = x + self.linear_heads(g)
-
-        # # Apply Norm & GLU and FFN
-        # X = self.gate(self.norm_ffn(x))
-        # # FFN & Residual connection
-        # x = x + self.ffn(X)
         ## Res+ strategy
         # Norm 
         x = self.norm(x)
@@ -419,26 +388,14 @@ class GATom(torch.nn.Module):
         # Local attention
         if self.line_graph:
             for local_attention_layer in self.local_attention_line:
-                # x, x_line = local_attention_layer(
-                #     x, edge_index, x_line, edge_index_line, edge_attr_line
-                # )
                 x_line = local_attention_layer(x_line,edge_index_line, edge_attr_line)
             for local_attention_layer in self.local_attention:
-                # x, x_line = local_attention_layer(
-                #     x, edge_index, x_line, edge_index_line, edge_attr_line
-                # )
                 x = local_attention_layer(x, edge_index, x_line)
-            
-                # apply dropout
-                #x = F.dropout(x, p=self.dropout, training=self.training)
-                #x_line = F.dropout(x_line, p=self.dropout, training=self.training)
         else:
             for local_attention_layer in self.local_attention:
                 x = local_attention_layer(x, edge_index, x_line)
-                # apply dropout
-                #x = F.dropout(x, p=self.dropout, training=self.training)
 
-        # Global attention: out is the supernode
+        # Global pooling
         out = self.global_pooling(x, x_line, batch, batch_line, global_features)
         out = F.dropout(out, p=self.dropout, training=self.training)
 

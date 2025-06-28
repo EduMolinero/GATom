@@ -149,7 +149,7 @@ class MatbenchDataset(InMemoryDataset):
     
     def process(
         self,
-        multiprocessing: bool = False,
+        multiprocessing: bool = True,
         n_workers: int = 8,
         chunk_size: int = 1000,
     ) -> None:

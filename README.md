@@ -15,11 +15,13 @@ It also contains a `main.py` file to generate those representations.
 The `crystal_builder` folder contains the files need to convert the crystal structure into a graph using a variety of algorithms.
 It is a fork from the [`kgcnn`](https://github.com/aimat-lab/gcnn_keras/tree/master/kgcnn/crystal) library adapted to work with `Pytorch` objects. All the credits should be given to the authors of that library.
 
-The `Pytorch-Geometric` dataset is built using `data.py` file where atom and edge features are incorporated into the graph.
+The `PyTorch-Geometric` dataset is built using `dataset.py`, which processes crystal structures from Matbench datasets with multiprocessing support and chunked memory management. 
+The `graphs.py` file handles graph construction from crystal structures, implementing Gaussian distance expansion for edge features, atomic encodings for node features, and a custom `MultiDiLineGraph` transform that creates the correspoding line graph for each graph with angle-based edge features. The dataset incorporates the space group symmetry as a global feature.
 
 ## Models 
 
-GATom is a graph neural network architecture that combines local and global graph attention with gating (using GLU) and optional residual connections for node and edge feature processing. 
+GATom is a graph neural network architecture that uses local graph attention with gating (using GLU) and optional residual connections for node and edge feature processing. The convolutional layers can process both the actual graph of the crystalline structure alongside its line graph.
+The pooling of the graph into one of the desired properties also takes into account the global properties of the crystal, more precisely, its point group.
 
 **Note**: The model is still under development and we are currently writing a paper about the model to explain it with more detail.
 
@@ -41,8 +43,13 @@ Currently, the best achieved performance for each of the datasets is
 
 |           Dataset           	| _mp_gap_ (MAE eV) 	| _perovskites_ (MAE eV/unit cell) 	| _mp_is_metal_ (ROCAUC) 	|
 |:---------------------------:	|:-----------------:	|:--------------------------------:	|:----------------------:	|
-| Without Residual Connection 	| 0.21040           	| 0.05404                          	| 0.95024                	|
-| With Residual Connection    	| 0.23214           	| 0.04486                          	| 0.95738                	|
+| Without Line Graph 	| 0.19815           	| 0.03206                          	| 0.96494                	|
+| With Line Graph    	| 0.20398           	| 0.03592                          	| 0.95650                	|
+
+The inclusion of the line graph features appears to not improve performance but rather the opposite
+We currently do not have an explanation for this behaviour and we are currently working on solving it.
+
+Note: each dataset is splitted into train, test and validation sets. The best performance value is obtained from either the test or the validation set.
 
 ## How to use
 
